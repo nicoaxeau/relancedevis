@@ -126,7 +126,7 @@ function fmtJour(d) {
   return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
 }
 
-function buildBuckets(lines) {
+function buildBuckets(lines, gran) {
   const dated = lines.filter((l) => l.date);
   if (dated.length < 2) return { ok: false, reason: "nodate", spanDays: 0 };
   let min = dated[0].date, max = dated[0].date;
@@ -137,25 +137,37 @@ function buildBuckets(lines) {
   const spanDays = Math.round((dayStart(max) - dayStart(min)) / 86400000) + 1;
   if (spanDays < 14) return { ok: false, reason: "short", spanDays: spanDays };
 
-  const mode = spanDays <= 60 ? "week" : "month";
-  const buckets = [];
+  const mode = (!gran || gran === "auto") ? (spanDays <= 60 ? "week" : "month") : gran;
+
   const keyOf = (d) => {
     if (mode === "month") return d.getFullYear() + "-" + d.getMonth();
+    if (mode === "day") return dayStart(d).getTime();
     const diff = Math.floor((dayStart(d) - dayStart(min)) / 86400000);
     return "w" + Math.floor(diff / 7);
   };
   const labelOf = (d) => {
     if (mode === "month") return MOIS[d.getMonth()] + " " + String(d.getFullYear()).slice(2);
+    if (mode === "day") return fmtJour(d);
     const diff = Math.floor((dayStart(d) - dayStart(min)) / 86400000);
     const start = new Date(dayStart(min).getTime() + Math.floor(diff / 7) * 7 * 86400000);
     return fmtJour(start);
   };
+  const fullOf = (d) => {
+    if (mode === "month") return "Mois de " + MOIS[d.getMonth()] + " " + d.getFullYear();
+    if (mode === "day") return "Journée du " + fmtJour(d) + "/" + d.getFullYear();
+    const diff = Math.floor((dayStart(d) - dayStart(min)) / 86400000);
+    const start = new Date(dayStart(min).getTime() + Math.floor(diff / 7) * 7 * 86400000);
+    const end = new Date(start.getTime() + 6 * 86400000);
+    return "Semaine du " + fmtJour(start) + " au " + fmtJour(end);
+  };
+
+  const buckets = [];
   const index = new Map();
   for (const l of dated) {
     const k = keyOf(l.date);
     if (!index.has(k)) {
       const b = {
-        key: k, label: labelOf(l.date), sort: l.date.getTime(),
+        key: k, label: labelOf(l.date), full: fullOf(l.date), sort: l.date.getTime(),
         nbDevis: 0, nbSigne: 0, nbAnnul: 0, nbMonetico: 0,
         valDevis: 0, valSigne: 0, valAnnul: 0, valMonetico: 0,
       };
@@ -177,8 +189,9 @@ function buildBuckets(lines) {
   return { ok: true, mode: mode, spanDays: spanDays, buckets: buckets, sansDate: lines.length - dated.length };
 }
 
-/* ---------- Graphique SVG ---------- */
-function Chart({ buckets, series, fmt, height }) {
+/* ---------- Graphique SVG avec infobulle ---------- */
+function Chart({ buckets, series, fmt, height, extra }) {
+  const [hi, setHi] = useState(null);
   const W = 720, H = height || 250;
   const padL = 62, padR = 14, padT = 16, padB = 42;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -193,10 +206,15 @@ function Chart({ buckets, series, fmt, height }) {
   const Y = (v) => padT + ih - (ih * v) / max;
   const ticks = [0, 0.25, 0.5, 0.75, 1];
   const step = n > 10 ? Math.ceil(n / 8) : 1;
+  const bandW = n <= 1 ? iw : iw / (n - 1);
+
+  const leftPct = hi != null ? (X(hi) / W) * 100 : 0;
+  const anchor = leftPct > 72 ? "translateX(-96%)" : (leftPct < 22 ? "translateX(-4%)" : "translateX(-50%)");
 
   return (
-    <div>
-      <svg viewBox={"0 0 " + W + " " + H} style={{ width: "100%", height: "auto", display: "block" }}>
+    <div style={{ position: "relative" }}>
+      <svg viewBox={"0 0 " + W + " " + H} style={{ width: "100%", height: "auto", display: "block" }}
+        onMouseLeave={() => setHi(null)}>
         {ticks.map((t, i) => (
           <g key={i}>
             <line x1={padL} x2={W - padR} y1={Y(max * t)} y2={Y(max * t)} stroke={LINE} strokeWidth="1" />
@@ -205,9 +223,13 @@ function Chart({ buckets, series, fmt, height }) {
         ))}
         {buckets.map((b, i) => (
           i % step === 0 ? (
-            <text key={i} x={X(i)} y={H - 22} textAnchor="middle" fontSize="11" fill={INK}>{b.label}</text>
+            <text key={i} x={X(i)} y={H - 22} textAnchor="middle" fontSize="11"
+              fill={hi === i ? NAVY : INK} fontWeight={hi === i ? "700" : "400"}>{b.label}</text>
           ) : null
         ))}
+        {hi != null && (
+          <line x1={X(hi)} x2={X(hi)} y1={padT} y2={padT + ih} stroke={NAVY} strokeWidth="1" strokeDasharray="4 4" opacity="0.55" />
+        )}
         {series.map((s, si) => (
           <g key={si}>
             <polyline
@@ -215,11 +237,40 @@ function Chart({ buckets, series, fmt, height }) {
               points={s.values.map((v, i) => X(i) + "," + Y(v)).join(" ")}
             />
             {s.values.map((v, i) => (
-              <circle key={i} cx={X(i)} cy={Y(v)} r="3.5" fill="#fff" stroke={s.color} strokeWidth="2" />
+              <circle key={i} cx={X(i)} cy={Y(v)} r={hi === i ? 5.5 : 3.5} fill="#fff" stroke={s.color} strokeWidth={hi === i ? 3 : 2} />
             ))}
           </g>
         ))}
+        {buckets.map((b, i) => (
+          <rect key={i} x={X(i) - bandW / 2} y={padT} width={bandW} height={ih}
+            fill="transparent" style={{ cursor: "crosshair" }}
+            onMouseEnter={() => setHi(i)} />
+        ))}
       </svg>
+
+      {hi != null && (
+        <div style={{
+          position: "absolute", left: leftPct + "%", top: 6, transform: anchor,
+          background: "#fff", border: "1px solid " + LINE, borderRadius: 8,
+          boxShadow: "0 4px 14px rgba(29,46,77,.14)", padding: "9px 12px",
+          fontSize: 12, color: NAVY, pointerEvents: "none", whiteSpace: "nowrap", zIndex: 5,
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 5 }}>{buckets[hi].full}</div>
+          {series.map((s, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: s.color, display: "inline-block", flexShrink: 0 }}></span>
+              <span style={{ color: INK }}>{s.name}</span>
+              <strong style={{ marginLeft: "auto", paddingLeft: 12 }}>{fmt(s.values[hi])}</strong>
+            </div>
+          ))}
+          {extra && (
+            <div style={{ marginTop: 6, paddingTop: 5, borderTop: "1px solid " + LINE, color: INK }}>
+              {extra(buckets[hi])}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "center", marginTop: 4 }}>
         {series.map((s, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: INK }}>
@@ -387,6 +438,7 @@ function KpiTab() {
   const [cmd, setCmd] = useState(null);
   const [annul, setAnnul] = useState(null);
   const [mone, setMone] = useState(null);
+  const [gran, setGran] = useState("auto");
   const [error, setError] = useState("");
   const [copiedT, setCopiedT] = useState(false);
   const [copiedA, setCopiedA] = useState(false);
@@ -517,37 +569,34 @@ function KpiTab() {
     const nbDecides = nbTransfo + nbAnnul;
     const valDecides = valTransfo + valAnnul;
 
-    const tauxNb = nbDevis ? nbTransfo / nbDevis : 0;
-    const tauxVal = valDevis ? valTransfo / valDevis : 0;
-    const tauxAnnul = nbDevis ? nbAnnul / nbDevis : 0;
-    const tauxAnnulVal = valDevis ? valAnnul / valDevis : 0;
-    const tauxAffine = nbDecides ? nbTransfo / nbDecides : 0;
-    const tauxAffineVal = valDecides ? valTransfo / valDecides : 0;
-    const partMone = nbTransfo ? nbMonetico / nbTransfo : 0;
-    const partMoneVal = valTransfo ? valMonetico / valTransfo : 0;
-
     const moy = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
 
-    const graph = buildBuckets(lines);
-
     return {
-      lines: lines, hasAnnul: hasAnnul, hasMone: hasMone, graph: graph,
+      lines: lines, hasAnnul: hasAnnul, hasMone: hasMone,
       orphelinsBdc: orphelinsBdc, orphelinsMone: orphelinsMone,
       nbDevis: nbDevis, valDevis: valDevis,
       nbTransfo: nbTransfo, valTransfo: valTransfo, ca: ca,
       delaiMoy: moy(delais), nbDelais: delais.length,
       nbAnnul: nbAnnul, valAnnul: valAnnul, delaiAnnulMoy: moy(delaisAnnul),
       nbMonetico: nbMonetico, valMonetico: valMonetico, delaiPaieMoy: moy(delaisPaie),
-      partMone: partMone, partMoneVal: partMoneVal,
+      partMone: nbTransfo ? nbMonetico / nbTransfo : 0,
+      partMoneVal: valTransfo ? valMonetico / valTransfo : 0,
       nbAttente: nbAttente, valAttente: valAttente,
-      tauxNb: tauxNb, tauxVal: tauxVal, tauxAnnul: tauxAnnul, tauxAnnulVal: tauxAnnulVal,
-      tauxAffine: tauxAffine, tauxAffineVal: tauxAffineVal,
+      nbDecides: nbDecides, valDecides: valDecides,
+      tauxNb: nbDevis ? nbTransfo / nbDevis : 0,
+      tauxVal: valDevis ? valTransfo / valDevis : 0,
+      tauxAnnul: nbDevis ? nbAnnul / nbDevis : 0,
+      tauxAnnulVal: valDevis ? valAnnul / valDevis : 0,
+      tauxAffine: nbDecides ? nbTransfo / nbDecides : 0,
+      tauxAffineVal: valDecides ? valTransfo / valDecides : 0,
     };
   }, [devis, cmd, annul, mone]);
 
+  const graph = useMemo(() => result ? buildBuckets(result.lines, gran) : null, [result, gran]);
+
   const tableTSV = useMemo(() => {
     if (!result) return "";
-    const statutLbl = { signe: "Signé", annule: "Annulé", attente: "En attente" };
+    const statutLbl = { signe: "Accepté", annule: "Annulé", attente: "En attente" };
     const head = ["Client", "Email", "Montant HT", "Statut", "Paiement CB", "Délai (j)"].join("\t");
     const body = result.lines.map((l) =>
       [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.monetico ? "Monetico" : "", l.delai != null ? l.delai : ""].join("\t")
@@ -621,7 +670,6 @@ function KpiTab() {
             <KpiCard label="Devis acceptés" main={String(result.nbTransfo)} sub={euro(result.valTransfo) + " HT"} accent={GREEN} />
             <KpiCard label="Taux de transfo." main={pct(result.tauxNb)} sub={pct(result.tauxVal) + " en valeur"} accent={BLUE_DEEP} />
             <KpiCard label="CA généré (HT)" main={euro(result.ca)} sub="= devis acceptés" accent={GREEN} />
-            <KpiCard label="Délai moyen" main={result.delaiMoy != null ? result.delaiMoy + " j" : "—"} sub="envoi → signature" accent={AMBER} />
           </div>
 
           {/* Volet annulation */}
@@ -630,19 +678,17 @@ function KpiTab() {
               <KpiCard label="Devis annulés" main={String(result.nbAnnul)} sub={euro(result.valAnnul) + " HT"} accent={RED} />
               <KpiCard label="Taux d'annulation" main={pct(result.tauxAnnul)} sub={pct(result.tauxAnnulVal) + " en valeur"} accent={RED} />
               <KpiCard label="En attente" main={String(result.nbAttente)} sub={euro(result.valAttente) + " HT"} accent={INK} />
-              <KpiCard label="Transfo. affinée" main={pct(result.tauxAffine)} sub="sur devis tranchés" accent={BLUE_DEEP} />
-              <KpiCard label="Délai annulation" main={result.delaiAnnulMoy != null ? result.delaiAnnulMoy + " j" : "—"} sub="envoi → annulation" accent={AMBER} />
+              <KpiCard label="Devis avec décision" main={String(result.nbDecides)} sub={euro(result.valDecides) + " HT"} accent={NAVY} />
+              <KpiCard label="Transfo. sur devis avec décision" main={pct(result.tauxAffine)} sub={pct(result.tauxAffineVal) + " en valeur"} accent={BLUE_DEEP} />
             </div>
           )}
 
           {/* Volet Monetico */}
           {result.hasMone && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginTop: 12 }}>
-              <KpiCard label="Réglés par CB" main={String(result.nbMonetico)} sub={euro(result.valMonetico) + " HT"} accent={PURPLE} />
+              <KpiCard label="Réglé via Monetico" main={String(result.nbMonetico)} sub={euro(result.valMonetico) + " HT"} accent={PURPLE} />
               <KpiCard label="Part Monetico" main={pct(result.partMone)} sub="des devis acceptés" accent={PURPLE} />
               <KpiCard label="Part Monetico (valeur)" main={pct(result.partMoneVal)} sub="du CA généré" accent={PURPLE} />
-              <KpiCard label="Autres règlements" main={String(result.nbTransfo - result.nbMonetico)} sub={euro(result.valTransfo - result.valMonetico) + " HT"} accent={INK} />
-              <KpiCard label="Délai paiement CB" main={result.delaiPaieMoy != null ? result.delaiPaieMoy + " j" : "—"} sub="envoi → paiement" accent={AMBER} />
             </div>
           )}
 
@@ -664,46 +710,56 @@ function KpiTab() {
 
           {/* Graphiques d'évolution */}
           <Card style={{ marginTop: 14 }}>
-            <Lbl>Évolution dans le temps</Lbl>
-            {result.graph.ok ? (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Évolution dans le temps</span>
+              <Segmented
+                value={gran}
+                onChange={setGran}
+                options={[["auto", "Auto"], ["day", "Jour"], ["week", "Semaine"], ["month", "Mois"]]}
+              />
+            </div>
+            {graph && graph.ok ? (
               <div>
                 <p style={{ fontSize: 12, color: INK, margin: "0 0 12px" }}>
-                  Découpage {result.graph.mode === "week" ? "hebdomadaire" : "mensuel"} sur {result.graph.spanDays} jours, d'après la date d'envoi des devis.
+                  Découpage {graph.mode === "day" ? "journalier" : graph.mode === "week" ? "hebdomadaire" : "mensuel"} sur {graph.spanDays} jours
+                  {gran === "auto" ? " (sélection automatique)" : ""}, d'après la date d'envoi des devis. Survole une courbe pour lire les valeurs.
                 </p>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, margin: "6px 0" }}>Taux (%)</div>
                 <Chart
-                  buckets={result.graph.buckets}
+                  buckets={graph.buckets}
                   fmt={pctShort}
+                  extra={(b) => b.nbDevis + " devis envoyé" + (b.nbDevis > 1 ? "s" : "") + " sur la période"}
                   series={[
-                    { name: "Taux de transformation", color: GREEN, values: result.graph.buckets.map((b) => b.nbDevis ? b.nbSigne / b.nbDevis : 0) },
+                    { name: "Taux de transformation", color: GREEN, values: graph.buckets.map((b) => b.nbDevis ? b.nbSigne / b.nbDevis : 0) },
                   ].concat(result.hasAnnul ? [
-                    { name: "Taux d'annulation", color: RED, values: result.graph.buckets.map((b) => b.nbDevis ? b.nbAnnul / b.nbDevis : 0) }
+                    { name: "Taux d'annulation", color: RED, values: graph.buckets.map((b) => b.nbDevis ? b.nbAnnul / b.nbDevis : 0) }
                   ] : []).concat(result.hasMone ? [
-                    { name: "Part Monetico (sur acceptés)", color: PURPLE, values: result.graph.buckets.map((b) => b.nbSigne ? b.nbMonetico / b.nbSigne : 0) }
+                    { name: "Part Monetico (sur acceptés)", color: PURPLE, values: graph.buckets.map((b) => b.nbSigne ? b.nbMonetico / b.nbSigne : 0) }
                   ] : [])}
                 />
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, margin: "18px 0 6px" }}>Volumes financiers (HT)</div>
                 <Chart
-                  buckets={result.graph.buckets}
+                  buckets={graph.buckets}
                   fmt={euroShort}
+                  extra={(b) => b.nbSigne + " accepté" + (b.nbSigne > 1 ? "s" : "") + " sur " + b.nbDevis + " devis"}
                   series={[
-                    { name: "Valeur devis envoyés", color: BLUE_DEEP, values: result.graph.buckets.map((b) => b.valDevis) },
-                    { name: "CA généré", color: GREEN, values: result.graph.buckets.map((b) => b.valSigne) },
+                    { name: "Valeur devis envoyés", color: BLUE_DEEP, values: graph.buckets.map((b) => b.valDevis) },
+                    { name: "CA généré", color: GREEN, values: graph.buckets.map((b) => b.valSigne) },
                   ].concat(result.hasMone ? [
-                    { name: "Encaissé via Monetico", color: PURPLE, values: result.graph.buckets.map((b) => b.valMonetico) }
+                    { name: "Encaissé via Monetico", color: PURPLE, values: graph.buckets.map((b) => b.valMonetico) }
                   ] : [])}
                 />
-                {result.graph.sansDate > 0 && (
+                {graph.sansDate > 0 && (
                   <p style={{ fontSize: 11.5, color: "#94a0b5", marginTop: 12 }}>
-                    {result.graph.sansDate} devis sans date d'envoi exploitable ne figurent pas dans les courbes.
+                    {graph.sansDate} devis sans date d'envoi exploitable ne figurent pas dans les courbes.
                   </p>
                 )}
               </div>
             ) : (
               <div style={{ padding: "22px 16px", borderRadius: 8, background: "#f7fafd", border: "1px dashed #cdd6e4", textAlign: "center", color: INK, fontSize: 13, lineHeight: 1.6 }}>
-                {result.graph.reason === "nodate"
+                {graph && graph.reason === "nodate"
                   ? "Pour afficher les courbes, sélectionne la colonne « Date d'envoi » dans le fichier des devis envoyés."
-                  : "Pour des données graphiques, merci de présenter des données sur au moins 14 jours (période actuelle : " + result.graph.spanDays + " jour" + (result.graph.spanDays > 1 ? "s" : "") + ")."}
+                  : "Pour des données graphiques, merci de présenter des données sur au moins 14 jours (période actuelle : " + (graph ? graph.spanDays : 0) + " jour" + (graph && graph.spanDays > 1 ? "s" : "") + ")."}
               </div>
             )}
           </Card>
@@ -770,6 +826,26 @@ function KpiTab() {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------- Sélecteur segmenté ---------- */
+function Segmented({ value, onChange, options }) {
+  return (
+    <div style={{ display: "inline-flex", border: "1px solid #cdd6e4", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+      {options.map((o, i) => (
+        <button key={o[0]} onClick={() => onChange(o[0])}
+          style={{
+            border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 700,
+            padding: "7px 14px",
+            borderLeft: i === 0 ? "none" : "1px solid #e6ecf4",
+            background: value === o[0] ? BLUE : "transparent",
+            color: value === o[0] ? "#fff" : INK,
+          }}>
+          {o[1]}
+        </button>
+      ))}
     </div>
   );
 }
