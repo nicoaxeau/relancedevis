@@ -59,16 +59,13 @@ function parseDateValue(v) {
   return isNaN(dt) ? null : dt;
 }
 const euro = (n) =>
-  (n || 0).toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
-const euroShort = (n) => {
-  n = n || 0;
-  if (Math.abs(n) >= 1000000) return (n / 1000000).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " M€";
-  if (Math.abs(n) >= 1000) return Math.round(n / 1000) + " k€";
-  return Math.round(n) + " €";
-};
+  (n || 0).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " €";
+const euroShort = (n) =>
+  (n || 0).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " €";
 const pct = (n) =>
-  (isFinite(n) ? n * 100 : 0).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " %";
-const pctShort = (n) => Math.round((isFinite(n) ? n : 0) * 100) + " %";
+  (isFinite(n) ? n * 100 : 0).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " %";
+const pctShort = (n) =>
+  (isFinite(n) ? n * 100 : 0).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " %";
 
 function guessCol(headers, sample, regex, needsAt) {
   const byName = headers.find((h) => regex.test(String(h)));
@@ -193,14 +190,19 @@ function buildBuckets(lines, gran) {
 function Chart({ buckets, series, fmt, height, extra }) {
   const [hi, setHi] = useState(null);
   const W = 720, H = height || 250;
-  const padL = 62, padR = 14, padT = 16, padB = 42;
+  const padL = 104, padR = 16, padT = 16, padB = 42;
   const iw = W - padL - padR, ih = H - padT - padB;
   const n = buckets.length;
 
-  let max = 0;
-  series.forEach((s) => s.values.forEach((v) => { if (v > max) max = v; }));
-  if (max <= 0) max = 1;
-  max = max * 1.12;
+  let raw = 0;
+  series.forEach((s) => s.values.forEach((v) => { if (v > raw) raw = v; }));
+  if (raw <= 0) raw = 1;
+  // borne haute arrondie pour que les graduations tombent sur des valeurs exactes
+  const rough = (raw * 1.08) / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+  const max = nice * mag * 4;
 
   const X = (i) => padL + (n <= 1 ? iw / 2 : (iw * i) / (n - 1));
   const Y = (v) => padT + ih - (ih * v) / max;
@@ -599,7 +601,7 @@ function KpiTab() {
     const statutLbl = { signe: "Accepté", annule: "Annulé", attente: "En attente" };
     const head = ["Client", "Email", "Montant HT", "Statut", "Paiement CB", "Délai (j)"].join("\t");
     const body = result.lines.map((l) =>
-      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.monetico ? "Monetico" : "", l.delai != null ? l.delai : ""].join("\t")
+      [l.nom, l.mail, l.montantHT.toFixed(2).replace(".", ","), statutLbl[l.statut], l.monetico ? "Monetico" : "", l.delai != null ? l.delai : ""].join("\t")
     );
     return [head].concat(body).join("\n");
   }, [result]);
