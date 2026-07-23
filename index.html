@@ -1,0 +1,688 @@
+import React, { useState, useMemo, useCallback, useRef } from "react";
+import * as XLSX from "xlsx";
+
+/* ---------- Charte Ax'eau ---------- */
+const NAVY = "#1D2E4D";
+const BLUE = "#69ACDF";
+const BLUE_DEEP = "#3E7CB1";
+const GREEN = "#2E9E5B";
+const AMBER = "#C9923E";
+const RED = "#C0444B";
+const INK = "#52607a";
+const LINE = "#e3e9f2";
+const BG = "#F4F8FC";
+const LOGO_URL =
+  "https://github.com/moundy-dev/img-repo/blob/main/LOGOTYPE%20baseline%20Bleu%20Ax'eau.jpg?raw=true";
+
+/* ---------- Helpers ---------- */
+function parseMontant(v) {
+  if (typeof v === "number") return isNaN(v) ? 0 : v;
+  if (!v) return 0;
+  let s = String(v).trim().replace(/[€\s\u00a0\u202f]/g, "").replace(/ttc|ht|htva/gi, "");
+  if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",")) s = s.replace(",", ".");
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+function parseDateValue(v) {
+  if (v instanceof Date && !isNaN(v)) return v;
+  if (typeof v === "number") {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d) ? null : d;
+  }
+  if (!v) return null;
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = "20" + y;
+    const dt = new Date(+y, +mo - 1, +d);
+    return isNaN(dt) ? null : dt;
+  }
+  const dt = new Date(s);
+  return isNaN(dt) ? null : dt;
+}
+const euro = (n) =>
+  (n || 0).toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
+const pct = (n) =>
+  (isFinite(n) ? n * 100 : 0).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " %";
+
+function guessCol(headers, sample, regex, needsAt) {
+  const byName = headers.find((h) => regex.test(String(h)));
+  if (byName) return byName;
+  if (needsAt) {
+    const h = headers.find((hh) => sample.some((r) => String(r[hh] || "").includes("@")));
+    if (h) return h;
+  }
+  return "";
+}
+// montant : on privilégie une colonne HT, sinon montant générique
+function guessMontantCol(headers, sample) {
+  const ht = headers.find((h) => /\bh\.?t\.?\b|hors\s*tax/i.test(String(h)));
+  if (ht) return ht;
+  return guessCol(headers, sample, /montant|total|prix|ttc|^ca$|valeur/i, false);
+}
+
+async function copyText(text, fallbackRef, setFlag, setErr) {
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {}
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch {}
+  }
+  if (ok) {
+    setFlag(true);
+    setErr("");
+    setTimeout(() => setFlag(false), 2000);
+  } else {
+    if (fallbackRef?.current) {
+      fallbackRef.current.focus();
+      fallbackRef.current.select();
+    }
+    setErr("Copie bloquée par le navigateur — le texte est sélectionné, fais Ctrl/Cmd + C.");
+  }
+}
+
+/* ===================================================================== */
+export default function App() {
+  const [tab, setTab] = useState("import");
+  return (
+    <div style={{ background: BG, minHeight: "100%", fontFamily: "'Segoe UI', Roboto, Helvetica, Arial, sans-serif", color: NAVY }}>
+      <Header tab={tab} setTab={setTab} />
+      <div style={{ maxWidth: 940, margin: "0 auto", padding: "26px 18px 70px" }}>
+        {tab === "import" ? <ImportTab /> : <KpiTab />}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Header avec logo + onglets ---------- */
+function Header({ tab, setTab }) {
+  const [logoOk, setLogoOk] = useState(true);
+  return (
+    <div style={{ background: `linear-gradient(115deg, ${NAVY} 0%, #24406b 55%, ${BLUE_DEEP} 100%)`, color: "#fff" }}>
+      <div style={{ maxWidth: 940, margin: "0 auto", padding: "20px 18px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+          {logoOk ? (
+            <span style={{ background: "#fff", borderRadius: 8, padding: "6px 10px", display: "inline-flex" }}>
+              <img src={LOGO_URL} alt="Ax'eau" height="30" style={{ height: 30, display: "block" }} onError={() => setLogoOk(false)} />
+            </span>
+          ) : (
+            <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.5 }}>Ax'eau</span>
+          )}
+          <div style={{ borderLeft: "1px solid rgba(255,255,255,.3)", paddingLeft: 14 }}>
+            <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>Pilotage des relances de devis</div>
+            <div style={{ fontSize: 12.5, color: "rgba(255,255,255,.75)" }}>Préparation d'import & analyse de performance</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          <Tab label="Import Mailjet" active={tab === "import"} onClick={() => setTab("import")} />
+          <Tab label="Analyse KPIs" active={tab === "kpi"} onClick={() => setTab("kpi")} />
+        </div>
+      </div>
+    </div>
+  );
+}
+function Tab({ label, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600,
+        padding: "11px 18px", borderRadius: "8px 8px 0 0",
+        background: active ? BG : "transparent",
+        color: active ? NAVY : "rgba(255,255,255,.8)",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/* ===================================================================== */
+/* ONGLET 1 — IMPORT MAILJET                                             */
+/* ===================================================================== */
+function ImportTab() {
+  const [rows, setRows] = useState([]);
+  const [headers, setHeaders] = useState([]);
+  const [emailCol, setEmailCol] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const outRef = useRef(null);
+
+  const parse = useCallback((data, name) => {
+    try {
+      const wb = XLSX.read(data, { type: "array", cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+      if (!json.length) { setError("Fichier vide ou sans en-têtes."); return; }
+      const hdrs = Object.keys(json[0]);
+      setHeaders(hdrs); setRows(json);
+      setEmailCol(guessCol(hdrs, json.slice(0, 20), /e-?mail|courriel|adresse/i, true));
+      setFileName(name); setError(""); setCopied(false);
+    } catch { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
+  }, []);
+
+  const onFile = useCallback((file) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = (e) => parse(e.target.result, file.name);
+    r.onerror = () => setError("Erreur de lecture du fichier.");
+    r.readAsArrayBuffer(file);
+  }, [parse]);
+
+  const validEmails = useMemo(() => {
+    if (!emailCol) return [];
+    const seen = new Set(); const out = [];
+    for (const r of rows) {
+      const m = String(r[emailCol] || "").trim().toLowerCase();
+      if (!m || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m) || seen.has(m)) continue;
+      seen.add(m); out.push(m);
+    }
+    return out;
+  }, [rows, emailCol]);
+
+  const block = useMemo(() => {
+    if (!validEmails.length) return "";
+    return ["email;statut;mail_perso", ...validEmails.map((m) => `${m};en cours;${m}`)].join("\n");
+  }, [validEmails]);
+
+  const reset = () => { setRows([]); setHeaders([]); setEmailCol(""); setFileName(""); setError(""); setCopied(false); };
+
+  return (
+    <div>
+      <Intro
+        title="Préparer un import"
+        text="Dépose l'export Vision des devis envoyés. L'outil isole les emails et génère le bloc à coller dans Mailjet, avec les champs email, statut (réglé sur « en cours ») et mail_perso."
+      />
+      {!rows.length && <Drop dragOver={dragOver} setDragOver={setDragOver} onFile={onFile} />}
+      {error && <ErrorBox>{error}</ErrorBox>}
+
+      {rows.length > 0 && (
+        <div>
+          <FileBar name={fileName} count={rows.length} onReset={reset} />
+          <Card>
+            <Lbl>Colonne contenant l'adresse email</Lbl>
+            <Select value={emailCol} onChange={setEmailCol} options={headers} />
+            <Hint>Détectée automatiquement, modifiable si besoin.</Hint>
+          </Card>
+          <div style={{ display: "flex", gap: 12, margin: "16px 0" }}>
+            <Stat label="Emails valides" value={validEmails.length} accent={BLUE_DEEP} />
+            <Stat label="Lignes ignorées" value={rows.length - validEmails.length} accent={AMBER} hint="vides, invalides ou en double" />
+          </div>
+          {block ? (
+            <Card>
+              <Row>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>À coller dans Mailjet</span>
+                <CopyBtn done={copied} onClick={() => copyText(block, outRef, setCopied, setError)} />
+              </Row>
+              <textarea ref={outRef} readOnly value={block} onFocus={(e) => e.target.select()} style={taStyle} />
+              <Hint>
+                Mailjet : liste « Relance devis » → Mettre à jour → colle ce bloc → à l'étape
+                « Faire correspondre les propriétés », vérifie que statut et mail_perso sont bien associés.
+              </Hint>
+            </Card>
+          ) : (
+            <Card><span style={{ color: RED, fontSize: 13 }}>Aucun email valide dans « {emailCol} ». Vérifie la colonne sélectionnée.</span></Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===================================================================== */
+/* ONGLET 2 — ANALYSE KPIs                                               */
+/* ===================================================================== */
+function KpiTab() {
+  const [devis, setDevis] = useState(null);   // {rows, headers, name, map}
+  const [cmd, setCmd] = useState(null);
+  const [annul, setAnnul] = useState(null);
+  const [error, setError] = useState("");
+  const [copiedT, setCopiedT] = useState(false);
+  const [copiedA, setCopiedA] = useState(false);
+  const tblRef = useRef(null);
+  const anaRef = useRef(null);
+
+  const loadFile = (file, setter) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+        if (!json.length) { setError("Un des fichiers est vide."); return; }
+        const headers = Object.keys(json[0]);
+        const sample = json.slice(0, 20);
+        const map = {
+          nom: guessCol(headers, sample, /nom|client|raison|soci/i, false),
+          email: guessCol(headers, sample, /e-?mail|courriel|adresse/i, true),
+          date: guessCol(headers, sample, /date|envoi|sign|command|annul|soumis/i, false),
+          montant: guessMontantCol(headers, sample),
+        };
+        setter({ rows: json, headers, name: file.name, map });
+        setError("");
+      } catch { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
+    };
+    r.readAsArrayBuffer(file);
+  };
+
+  const setMap = (which, field, value) => {
+    const obj = which === "devis" ? devis : which === "cmd" ? cmd : annul;
+    const setter = which === "devis" ? setDevis : which === "cmd" ? setCmd : setAnnul;
+    setter({ ...obj, map: { ...obj.map, [field]: value } });
+  };
+
+  /* --- Croisement & calcul ---
+     Source de vérité = fichier 1 (devis envoyés). La colonne Montant HT du
+     devis donne TOUTES les valeurs (devis, commande, annulation).
+     Les fichiers 2 et 3 ne servent qu'à attribuer un statut via l'email.
+     Un BDC / une annulation sans devis correspondant est ignoré. */
+  const result = useMemo(() => {
+    if (!devis || !cmd) return null;
+    const dm = devis.map, cm = cmd.map;
+    if (!dm.email || !dm.montant || !cm.email) return null;
+
+    const hasAnnul = !!(annul && annul.map.email);
+    const am = annul ? annul.map : null;
+
+    // ensemble des emails signés (+ 1re date de signature pour le délai)
+    const cmdByEmail = new Map();
+    for (const r of cmd.rows) {
+      const mail = String(r[cm.email] || "").trim().toLowerCase();
+      if (!mail) continue;
+      const date = cm.date ? parseDateValue(r[cm.date]) : null;
+      if (!cmdByEmail.has(mail)) cmdByEmail.set(mail, { date: null });
+      const e = cmdByEmail.get(mail);
+      if (date && (!e.date || date < e.date)) e.date = date;
+    }
+
+    // ensemble des emails ayant annulé (export Gravity : email + date)
+    const annulByEmail = new Map();
+    if (hasAnnul) {
+      for (const r of annul.rows) {
+        const mail = String(r[am.email] || "").trim().toLowerCase();
+        if (!mail) continue;
+        const date = am.date ? parseDateValue(r[am.date]) : null;
+        if (!annulByEmail.has(mail)) annulByEmail.set(mail, { date: null });
+        const e = annulByEmail.get(mail);
+        if (date && (!e.date || date < e.date)) e.date = date;
+      }
+    }
+
+    const lines = [];
+    let valDevis = 0, valTransfo = 0, nbTransfo = 0;
+    let nbAnnul = 0, valAnnul = 0;
+    const delais = [], delaisAnnul = [];
+    const seenDevis = new Set();
+    let orphelinsBdc = 0;
+
+    for (const r of devis.rows) {
+      const mail = String(r[dm.email] || "").trim().toLowerCase();
+      if (!mail) continue;
+      const montantHT = parseMontant(r[dm.montant]); // LA valeur de référence
+      const dateDevis = dm.date ? parseDateValue(r[dm.date]) : null;
+      const nom = dm.nom ? r[dm.nom] : "";
+      seenDevis.add(mail);
+      valDevis += montantHT;
+
+      const mCmd = cmdByEmail.get(mail);
+      const mAnnul = hasAnnul ? annulByEmail.get(mail) : null;
+
+      let statut = "attente", delai = null;
+
+      if (mCmd) {
+        // signé l'emporte sur annulé
+        statut = "signe"; nbTransfo++; valTransfo += montantHT;
+        if (dateDevis && mCmd.date) {
+          const d = Math.round((mCmd.date - dateDevis) / 86400000);
+          if (d >= 0) { delai = d; delais.push(d); }
+        }
+      } else if (mAnnul) {
+        statut = "annule"; nbAnnul++; valAnnul += montantHT;
+        if (dateDevis && mAnnul.date) {
+          const d = Math.round((mAnnul.date - dateDevis) / 86400000);
+          if (d >= 0) { delai = d; delaisAnnul.push(d); }
+        }
+      }
+      lines.push({ nom, mail, montantHT, statut, delai });
+    }
+
+    // BDC sans devis correspondant → exclus du reporting (info de contrôle)
+    for (const mail of cmdByEmail.keys()) if (!seenDevis.has(mail)) orphelinsBdc++;
+
+    const nbDevis = lines.length;
+    const ca = valTransfo; // CA = valeur HT des devis signés
+    const nbAttente = nbDevis - nbTransfo - nbAnnul;
+    const valAttente = valDevis - valTransfo - valAnnul;
+    const nbDecides = nbTransfo + nbAnnul;
+    const valDecides = valTransfo + valAnnul;
+
+    const tauxNb = nbDevis ? nbTransfo / nbDevis : 0;
+    const tauxVal = valDevis ? valTransfo / valDevis : 0;
+    const tauxAnnul = nbDevis ? nbAnnul / nbDevis : 0;
+    const tauxAnnulVal = valDevis ? valAnnul / valDevis : 0;
+    const tauxAffine = nbDecides ? nbTransfo / nbDecides : 0;
+    const tauxAffineVal = valDecides ? valTransfo / valDecides : 0;
+
+    const delaiMoy = delais.length ? Math.round(delais.reduce((a, b) => a + b, 0) / delais.length) : null;
+    const delaiAnnulMoy = delaisAnnul.length ? Math.round(delaisAnnul.reduce((a, b) => a + b, 0) / delaisAnnul.length) : null;
+
+    return {
+      lines, hasAnnul, orphelinsBdc, nbDevis, valDevis,
+      nbTransfo, valTransfo, ca, delaiMoy, nbDelais: delais.length,
+      nbAnnul, valAnnul, delaiAnnulMoy, nbDelaisAnnul: delaisAnnul.length,
+      nbAttente, valAttente,
+      tauxNb, tauxVal, tauxAnnul, tauxAnnulVal, tauxAffine, tauxAffineVal,
+    };
+  }, [devis, cmd, annul]);
+
+  /* --- Exports --- */
+  const tableTSV = useMemo(() => {
+    if (!result) return "";
+    const statutLbl = { signe: "Signé", annule: "Annulé", attente: "En attente" };
+    const head = ["Client", "Email", "Montant HT", "Statut", "Délai (j)"].join("\t");
+    const body = result.lines.map((l) =>
+      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.delai ?? ""].join("\t")
+    );
+    return [head, ...body].join("\n");
+  }, [result]);
+
+  const analyse = useMemo(() => {
+    if (!result) return "";
+    const r = result;
+    let txt =
+      `Sur la période analysée, ${r.nbDevis} devis ont été envoyés pour une valeur totale de ${euro(r.valDevis)} HT. ` +
+      `${r.nbTransfo} ont donné lieu à un bon de commande, soit un taux de transformation de ${pct(r.tauxNb)} en volume et ${pct(r.tauxVal)} en valeur, ` +
+      `pour un chiffre d'affaires de ${euro(r.ca)} HT.`;
+
+    if (r.delaiMoy != null)
+      txt += ` Le délai moyen entre l'envoi et la signature est de ${r.delaiMoy} jour${r.delaiMoy > 1 ? "s" : ""} (sur ${r.nbDelais} signature${r.nbDelais > 1 ? "s" : ""} datée${r.nbDelais > 1 ? "s" : ""}).`;
+
+    if (r.hasAnnul) {
+      txt += ` ${r.nbAnnul} devis ont été annulés via le formulaire, soit un taux d'annulation de ${pct(r.tauxAnnul)} en volume (${euro(r.valAnnul)} HT de devis perdus).`;
+      if (r.delaiAnnulMoy != null)
+        txt += ` Le délai moyen avant annulation est de ${r.delaiAnnulMoy} jour${r.delaiAnnulMoy > 1 ? "s" : ""}.`;
+      txt += ` En écartant les ${r.nbAttente} devis encore en attente, le taux de transformation sur devis tranchés s'établit à ${pct(r.tauxAffine)} en volume et ${pct(r.tauxAffineVal)} en valeur.`;
+    }
+
+    let qualite;
+    const ref = r.hasAnnul ? r.tauxAffine : r.tauxNb;
+    if (ref >= 0.5) qualite = " C'est un très bon niveau de transformation.";
+    else if (ref >= 0.35) qualite = " Le niveau de transformation est conforme à la moyenne observée sur la période.";
+    else qualite = " Le niveau de transformation reste perfectible et mérite d'analyser les motifs de non-signature.";
+    return txt + qualite;
+  }, [result]);
+
+  const ready = devis && cmd;
+
+  return (
+    <div>
+      <Intro
+        title="Analyser la performance"
+        text="Dépose les exports sur une même période : les devis envoyés (Vision), les bons de commande (Vision), et — optionnel — les annulations de devis (export Gravity Forms). Tous les montants proviennent de la colonne Montant HT des devis ; les fichiers 2 et 3 ne servent qu'à déterminer le statut via l'email. Seuls les devis envoyés comptent dans le reporting."
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginBottom: 4 }}>
+        <FileSlot title="1 · Devis envoyés" subtitle="Vision — nom, email, date, Montant HT (référence)" dateLabel="Date d'envoi" montantLabel="Montant Hors-Taxe" data={devis}
+          onFile={(f) => loadFile(f, setDevis)} onReset={() => setDevis(null)} onMap={(field, v) => setMap("devis", field, v)} />
+        <FileSlot title="2 · Bons de commande" subtitle="Vision — email + date de signature" dateLabel="Date de signature" showMontant={false} data={cmd}
+          onFile={(f) => loadFile(f, setCmd)} onReset={() => setCmd(null)} onMap={(field, v) => setMap("cmd", field, v)} />
+        <FileSlot title="3 · Annulations de devis" subtitle="optionnel — export Gravity : email + date" dateLabel="Date d'annulation" showMontant={false} optional data={annul}
+          onFile={(f) => loadFile(f, setAnnul)} onReset={() => setAnnul(null)} onMap={(field, v) => setMap("annul", field, v)} />
+      </div>
+
+      {error && <ErrorBox>{error}</ErrorBox>}
+
+      {ready && !result && (
+        <ErrorBox>Sélectionne au minimum la colonne <b>email</b> et la colonne <b>Montant HT</b> dans le fichier Devis, et la colonne <b>email</b> dans le fichier Bons de commande.</ErrorBox>
+      )}
+
+      {result && (
+        <div style={{ marginTop: 18 }}>
+          {/* KPIs principaux */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
+            <KpiCard label="Devis envoyés" main={String(result.nbDevis)} sub={euro(result.valDevis) + " HT"} accent={NAVY} />
+            <KpiCard label="Devis signés" main={String(result.nbTransfo)} sub={euro(result.valTransfo) + " HT"} accent={GREEN} />
+            <KpiCard label="Taux de transfo." main={pct(result.tauxNb)} sub={pct(result.tauxVal) + " en valeur"} accent={BLUE_DEEP} />
+            <KpiCard label="CA généré (HT)" main={euro(result.ca)} sub="= devis signés" accent={GREEN} />
+            <KpiCard label="Délai moyen" main={result.delaiMoy != null ? result.delaiMoy + " j" : "—"} sub="envoi → signature" accent={AMBER} />
+          </div>
+
+          {/* Volet annulation */}
+          {result.hasAnnul && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginTop: 12 }}>
+              <KpiCard label="Devis annulés" main={String(result.nbAnnul)} sub={euro(result.valAnnul) + " HT"} accent={RED} />
+              <KpiCard label="Taux d'annulation" main={pct(result.tauxAnnul)} sub={pct(result.tauxAnnulVal) + " en valeur"} accent={RED} />
+              <KpiCard label="En attente" main={String(result.nbAttente)} sub={euro(result.valAttente) + " HT"} accent={INK} />
+              <KpiCard label="Transfo. affinée" main={pct(result.tauxAffine)} sub="sur devis tranchés" accent={BLUE_DEEP} />
+              <KpiCard label="Délai annulation" main={result.delaiAnnulMoy != null ? result.delaiAnnulMoy + " j" : "—"} sub="envoi → annulation" accent={AMBER} />
+            </div>
+          )}
+
+          {/* Barre de répartition */}
+          <Card style={{ marginTop: 14 }}>
+            <Lbl>Répartition des devis (en volume)</Lbl>
+            <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden", border: `1px solid ${LINE}`, marginTop: 6 }}>
+              {result.nbTransfo > 0 && (
+                <Seg w={result.nbTransfo / result.nbDevis} bg={GREEN} fg="#fff" label={`${result.nbTransfo} signés`} />
+              )}
+              {result.hasAnnul && result.nbAnnul > 0 && (
+                <Seg w={result.nbAnnul / result.nbDevis} bg={RED} fg="#fff" label={`${result.nbAnnul} annulés`} />
+              )}
+              {result.nbAttente > 0 && (
+                <Seg w={result.nbAttente / result.nbDevis} bg="#eef2f8" fg={INK} label={`${result.nbAttente} en attente`} />
+              )}
+            </div>
+          </Card>
+
+          {/* Contrôle orphelins */}
+          {result.orphelinsBdc > 0 && (
+            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#fff7ea", color: "#8a6516", fontSize: 12.5, border: `1px solid #f0e0c0` }}>
+              {result.orphelinsBdc} bon{result.orphelinsBdc > 1 ? "s" : ""} de commande sans devis correspondant {result.orphelinsBdc > 1 ? "ont" : "a"} été exclu{result.orphelinsBdc > 1 ? "s" : ""} du reporting (aucun email associé dans les devis envoyés).
+            </div>
+          )}
+
+          {/* Analyse texte */}
+          <Card style={{ marginTop: 14 }}>
+            <Row>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Analyse</span>
+              <CopyBtn done={copiedA} onClick={() => copyText(analyse, anaRef, setCopiedA, setError)} />
+            </Row>
+            <textarea ref={anaRef} readOnly value={analyse} onFocus={(e) => e.target.select()}
+              style={{ ...taStyle, minHeight: 130, fontFamily: "inherit", fontSize: 14, lineHeight: 1.55 }} />
+          </Card>
+
+          {/* Tableau détaillé */}
+          <Card style={{ marginTop: 14 }}>
+            <Row>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Détail par devis</span>
+              <CopyBtn done={copiedT} label="Copier le tableau" onClick={() => copyText(tableTSV, tblRef, setCopiedT, setError)} />
+            </Row>
+            <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: "#f3f7fc" }}>
+                    {["Client", "Email", "Montant HT", "Statut", "Délai"].map((h) => (
+                      <th key={h} style={th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.lines.map((l, i) => (
+                    <tr key={i} style={{ borderTop: `1px solid ${LINE}` }}>
+                      <td style={td}>{l.nom || "—"}</td>
+                      <td style={{ ...td, color: INK }}>{l.mail}</td>
+                      <td style={{ ...td, textAlign: "right" }}>{euro(l.montantHT)}</td>
+                      <td style={td}><StatutBadge statut={l.statut} /></td>
+                      <td style={{ ...td, textAlign: "right" }}>{l.delai != null ? l.delai + " j" : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <textarea ref={tblRef} readOnly value={tableTSV} style={{ position: "absolute", left: -9999, top: -9999, width: 1, height: 1 }} />
+            <Hint>Le tableau se colle directement dans Excel (colonnes séparées par tabulation).</Hint>
+          </Card>
+
+          <p style={{ fontSize: 11.5, color: "#94a0b5", marginTop: 14, lineHeight: 1.5 }}>
+            Source de vérité : le fichier des devis envoyés. La colonne Montant HT du devis donne la valeur du devis, de la commande (si signé) et de l'annulation (si annulé).
+            Statut attribué par email : présent dans les bons de commande → signé ; sinon présent dans les annulations → annulé ; sinon en attente.
+            Un BDC ou une annulation sans devis envoyé correspondant est ignoré. Le taux affiné exclut les devis en attente (signés ÷ devis tranchés).
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Seg({ w, bg, fg, label }) {
+  return (
+    <div style={{ width: `${Math.max(w * 100, 0)}%`, background: bg, color: fg, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 44, whiteSpace: "nowrap", overflow: "hidden" }}>
+      {label}
+    </div>
+  );
+}
+function StatutBadge({ statut }) {
+  const cfg = {
+    signe: { txt: "Signé", c: GREEN, bg: "#e7f5ed" },
+    annule: { txt: "Annulé", c: RED, bg: "#fdecee" },
+    attente: { txt: "En attente", c: INK, bg: "#eef2f8" },
+  }[statut];
+  return <span style={{ fontSize: 12, fontWeight: 700, color: cfg.c, background: cfg.bg, padding: "2px 8px", borderRadius: 20 }}>{cfg.txt}</span>;
+}
+
+/* ---------- Slot fichier (onglet KPI) ---------- */
+function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant = true, optional, data, onFile, onReset, onMap }) {
+  const [dragOver, setDragOver] = useState(false);
+  const fields = [
+    ["nom", "Client / nom"],
+    ["email", "Email"],
+    ["date", dateLabel || "Date"],
+    ...(showMontant ? [["montant", montantLabel || "Montant"]] : []),
+  ];
+  return (
+    <div style={{ ...cardStyle, padding: 14, ...(optional ? { borderStyle: "dashed" } : {}) }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>{title}</div>
+      <div style={{ fontSize: 12, color: INK, marginBottom: 10 }}>{subtitle}</div>
+      {!data ? (
+        <label
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files?.[0]); }}
+          style={{ display: "block", border: `2px dashed ${dragOver ? BLUE : "#cdd6e4"}`, borderRadius: 10, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "26px 12px", textAlign: "center", cursor: "pointer" }}
+        >
+          <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Déposer le fichier</div>
+          <div style={{ fontSize: 11.5, color: INK, marginTop: 3 }}>.xlsx, .xls, .csv</div>
+        </label>
+      ) : (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ fontSize: 12, color: INK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>
+              {data.name} · {data.rows.length} l.
+            </span>
+            <button onClick={onReset} style={{ ...ghostBtn, padding: "4px 9px", fontSize: 11 }}>Changer</button>
+          </div>
+          {fields.map(([f, lbl]) => (
+            <div key={f} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11.5, color: INK, marginBottom: 3 }}>{lbl}</div>
+              <Select value={data.map[f]} onChange={(v) => onMap(f, v)} options={["", ...data.headers]} small />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Composants UI réutilisables ---------- */
+function Intro({ title, text }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <h2 style={{ fontSize: 20, margin: "0 0 6px" }}>{title}</h2>
+      <p style={{ fontSize: 14, lineHeight: 1.55, margin: 0, color: INK }}>{text}</p>
+    </div>
+  );
+}
+function Drop({ dragOver, setDragOver, onFile }) {
+  return (
+    <label
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files?.[0]); }}
+      style={{ display: "block", border: `2px dashed ${dragOver ? BLUE : "#cdd6e4"}`, borderRadius: 12, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "44px 24px", textAlign: "center", cursor: "pointer" }}
+    >
+      <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
+      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Glisse ton fichier ici</div>
+      <div style={{ fontSize: 13, color: INK }}>ou clique pour le sélectionner — .xlsx, .xls, .csv</div>
+    </label>
+  );
+}
+function FileBar({ name, count, onReset }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, color: INK }}>Fichier : <strong style={{ color: NAVY }}>{name}</strong> — {count} ligne{count > 1 ? "s" : ""}</div>
+      <button onClick={onReset} style={ghostBtn}>Charger un autre fichier</button>
+    </div>
+  );
+}
+function Card({ children, style }) { return <div style={{ ...cardStyle, ...style }}>{children}</div>; }
+function Row({ children }) { return <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>{children}</div>; }
+function Lbl({ children }) { return <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{children}</label>; }
+function Hint({ children }) { return <p style={{ fontSize: 12, color: INK, margin: "10px 0 0", lineHeight: 1.6 }}>{children}</p>; }
+function ErrorBox({ children }) { return <div style={{ marginTop: 14, padding: "12px 14px", borderRadius: 8, background: "#fdeced", color: "#a8323a", fontSize: 13 }}>{children}</div>; }
+function Select({ value, onChange, options, small }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}
+      style={{ width: "100%", fontSize: small ? 13 : 14, padding: small ? "7px 9px" : "9px 10px", borderRadius: 8, border: "1px solid #cdd6e4", background: "#fff", color: NAVY, boxSizing: "border-box" }}>
+      {options.map((h) => <option key={h} value={h}>{h === "" ? "— (aucune)" : h}</option>)}
+    </select>
+  );
+}
+function Stat({ label, value, accent, hint }) {
+  return (
+    <div style={{ flex: 1, ...cardStyle, padding: "12px 14px" }}>
+      <div style={{ fontSize: 26, fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+      <div style={{ fontSize: 12, color: INK, marginTop: 2 }}>{label}</div>
+      {hint && <div style={{ fontSize: 11, color: "#94a0b5", marginTop: 2 }}>{hint}</div>}
+    </div>
+  );
+}
+function KpiCard({ label, main, sub, accent }) {
+  return (
+    <div style={{ ...cardStyle, padding: "14px 16px", borderTop: `3px solid ${accent}` }}>
+      <div style={{ fontSize: 11.5, color: INK, textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, color: accent, margin: "4px 0 1px", fontVariantNumeric: "tabular-nums" }}>{main}</div>
+      <div style={{ fontSize: 12, color: INK }}>{sub}</div>
+    </div>
+  );
+}
+function CopyBtn({ done, onClick, label = "Copier" }) {
+  return <button onClick={onClick} style={primaryBtn}>{done ? "Copié ✓" : label}</button>;
+}
+
+/* ---------- Styles ---------- */
+const cardStyle = { border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, background: "#fff", boxShadow: "0 1px 2px rgba(29,46,77,.04)" };
+const taStyle = { width: "100%", minHeight: 190, resize: "vertical", fontFamily: "Menlo, Consolas, monospace", fontSize: 13, lineHeight: 1.5, color: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12, boxSizing: "border-box", background: "#fbfcfe" };
+const th = { textAlign: "left", padding: "9px 10px", fontSize: 11.5, fontWeight: 700, color: INK, whiteSpace: "nowrap" };
+const td = { padding: "8px 10px", verticalAlign: "middle" };
+const primaryBtn = { background: BLUE, color: "#fff", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" };
+const ghostBtn = { background: "transparent", color: BLUE_DEEP, border: `1px solid ${BLUE}`, borderRadius: 7, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
