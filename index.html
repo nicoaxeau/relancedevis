@@ -1,5 +1,20 @@
-import React, { useState, useMemo, useCallback, useRef } from "react";
-import * as XLSX from "xlsx";
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pilotage relances devis — Ax'eau</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#F4F8FC}</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback, useRef } = React;
 
 /* ---------- Charte Ax'eau ---------- */
 const NAVY = "#1D2E4D";
@@ -34,9 +49,9 @@ function parseDateValue(v) {
   const s = String(v).trim();
   const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
   if (m) {
-    let [, d, mo, y] = m;
+    let y = m[3];
     if (y.length === 2) y = "20" + y;
-    const dt = new Date(+y, +mo - 1, +d);
+    const dt = new Date(+y, +m[2] - 1, +m[1]);
     return isNaN(dt) ? null : dt;
   }
   const dt = new Date(s);
@@ -56,7 +71,6 @@ function guessCol(headers, sample, regex, needsAt) {
   }
   return "";
 }
-// montant : on privilégie une colonne HT, sinon montant générique
 function guessMontantCol(headers, sample) {
   const ht = headers.find((h) => /\bh\.?t\.?\b|hors\s*tax/i.test(String(h)));
   if (ht) return ht;
@@ -70,7 +84,7 @@ async function copyText(text, fallbackRef, setFlag, setErr) {
       await navigator.clipboard.writeText(text);
       ok = true;
     }
-  } catch {}
+  } catch (e) {}
   if (!ok) {
     try {
       const ta = document.createElement("textarea");
@@ -82,14 +96,14 @@ async function copyText(text, fallbackRef, setFlag, setErr) {
       ta.select();
       ok = document.execCommand("copy");
       document.body.removeChild(ta);
-    } catch {}
+    } catch (e) {}
   }
   if (ok) {
     setFlag(true);
     setErr("");
     setTimeout(() => setFlag(false), 2000);
   } else {
-    if (fallbackRef?.current) {
+    if (fallbackRef && fallbackRef.current) {
       fallbackRef.current.focus();
       fallbackRef.current.select();
     }
@@ -98,10 +112,10 @@ async function copyText(text, fallbackRef, setFlag, setErr) {
 }
 
 /* ===================================================================== */
-export default function App() {
+function App() {
   const [tab, setTab] = useState("import");
   return (
-    <div style={{ background: BG, minHeight: "100%", fontFamily: "'Segoe UI', Roboto, Helvetica, Arial, sans-serif", color: NAVY }}>
+    <div style={{ background: BG, minHeight: "100vh", fontFamily: "'Segoe UI', Roboto, Helvetica, Arial, sans-serif", color: NAVY }}>
       <Header tab={tab} setTab={setTab} />
       <div style={{ maxWidth: 940, margin: "0 auto", padding: "26px 18px 70px" }}>
         {tab === "import" ? <ImportTab /> : <KpiTab />}
@@ -110,11 +124,10 @@ export default function App() {
   );
 }
 
-/* ---------- Header avec logo + onglets ---------- */
 function Header({ tab, setTab }) {
   const [logoOk, setLogoOk] = useState(true);
   return (
-    <div style={{ background: `linear-gradient(115deg, ${NAVY} 0%, #24406b 55%, ${BLUE_DEEP} 100%)`, color: "#fff" }}>
+    <div style={{ background: "linear-gradient(115deg, " + NAVY + " 0%, #24406b 55%, " + BLUE_DEEP + " 100%)", color: "#fff" }}>
       <div style={{ maxWidth: 940, margin: "0 auto", padding: "20px 18px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
           {logoOk ? (
@@ -139,15 +152,13 @@ function Header({ tab, setTab }) {
 }
 function Tab({ label, active, onClick }) {
   return (
-    <button
-      onClick={onClick}
+    <button onClick={onClick}
       style={{
         border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600,
         padding: "11px 18px", borderRadius: "8px 8px 0 0",
         background: active ? BG : "transparent",
         color: active ? NAVY : "rgba(255,255,255,.8)",
-      }}
-    >
+      }}>
       {label}
     </button>
   );
@@ -176,7 +187,7 @@ function ImportTab() {
       setHeaders(hdrs); setRows(json);
       setEmailCol(guessCol(hdrs, json.slice(0, 20), /e-?mail|courriel|adresse/i, true));
       setFileName(name); setError(""); setCopied(false);
-    } catch { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
+    } catch (e) { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
   }, []);
 
   const onFile = useCallback((file) => {
@@ -200,7 +211,7 @@ function ImportTab() {
 
   const block = useMemo(() => {
     if (!validEmails.length) return "";
-    return ["email;statut;mail_perso", ...validEmails.map((m) => `${m};en cours;${m}`)].join("\n");
+    return ["email;statut;mail_perso"].concat(validEmails.map((m) => m + ";en cours;" + m)).join("\n");
   }, [validEmails]);
 
   const reset = () => { setRows([]); setHeaders([]); setEmailCol(""); setFileName(""); setError(""); setCopied(false); };
@@ -251,7 +262,7 @@ function ImportTab() {
 /* ONGLET 2 — ANALYSE KPIs                                               */
 /* ===================================================================== */
 function KpiTab() {
-  const [devis, setDevis] = useState(null);   // {rows, headers, name, map}
+  const [devis, setDevis] = useState(null);
   const [cmd, setCmd] = useState(null);
   const [annul, setAnnul] = useState(null);
   const [error, setError] = useState("");
@@ -277,9 +288,9 @@ function KpiTab() {
           date: guessCol(headers, sample, /date|envoi|sign|command|annul|soumis/i, false),
           montant: guessMontantCol(headers, sample),
         };
-        setter({ rows: json, headers, name: file.name, map });
+        setter({ rows: json, headers: headers, name: file.name, map: map });
         setError("");
-      } catch { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
+      } catch (err) { setError("Lecture impossible. Formats : .xlsx, .xls, .csv"); }
     };
     r.readAsArrayBuffer(file);
   };
@@ -287,14 +298,14 @@ function KpiTab() {
   const setMap = (which, field, value) => {
     const obj = which === "devis" ? devis : which === "cmd" ? cmd : annul;
     const setter = which === "devis" ? setDevis : which === "cmd" ? setCmd : setAnnul;
-    setter({ ...obj, map: { ...obj.map, [field]: value } });
+    const newMap = Object.assign({}, obj.map);
+    newMap[field] = value;
+    setter(Object.assign({}, obj, { map: newMap }));
   };
 
-  /* --- Croisement & calcul ---
-     Source de vérité = fichier 1 (devis envoyés). La colonne Montant HT du
-     devis donne TOUTES les valeurs (devis, commande, annulation).
-     Les fichiers 2 et 3 ne servent qu'à attribuer un statut via l'email.
-     Un BDC / une annulation sans devis correspondant est ignoré. */
+  /* Source de vérité = fichier 1 (devis envoyés). La colonne Montant HT du
+     devis donne TOUTES les valeurs. Les fichiers 2 et 3 ne servent qu'à
+     attribuer un statut via l'email. BDC/annulation sans devis = ignoré. */
   const result = useMemo(() => {
     if (!devis || !cmd) return null;
     const dm = devis.map, cm = cmd.map;
@@ -303,7 +314,6 @@ function KpiTab() {
     const hasAnnul = !!(annul && annul.map.email);
     const am = annul ? annul.map : null;
 
-    // ensemble des emails signés (+ 1re date de signature pour le délai)
     const cmdByEmail = new Map();
     for (const r of cmd.rows) {
       const mail = String(r[cm.email] || "").trim().toLowerCase();
@@ -314,7 +324,6 @@ function KpiTab() {
       if (date && (!e.date || date < e.date)) e.date = date;
     }
 
-    // ensemble des emails ayant annulé (export Gravity : email + date)
     const annulByEmail = new Map();
     if (hasAnnul) {
       for (const r of annul.rows) {
@@ -337,7 +346,7 @@ function KpiTab() {
     for (const r of devis.rows) {
       const mail = String(r[dm.email] || "").trim().toLowerCase();
       if (!mail) continue;
-      const montantHT = parseMontant(r[dm.montant]); // LA valeur de référence
+      const montantHT = parseMontant(r[dm.montant]);
       const dateDevis = dm.date ? parseDateValue(r[dm.date]) : null;
       const nom = dm.nom ? r[dm.nom] : "";
       seenDevis.add(mail);
@@ -349,7 +358,6 @@ function KpiTab() {
       let statut = "attente", delai = null;
 
       if (mCmd) {
-        // signé l'emporte sur annulé
         statut = "signe"; nbTransfo++; valTransfo += montantHT;
         if (dateDevis && mCmd.date) {
           const d = Math.round((mCmd.date - dateDevis) / 86400000);
@@ -362,14 +370,13 @@ function KpiTab() {
           if (d >= 0) { delai = d; delaisAnnul.push(d); }
         }
       }
-      lines.push({ nom, mail, montantHT, statut, delai });
+      lines.push({ nom: nom, mail: mail, montantHT: montantHT, statut: statut, delai: delai });
     }
 
-    // BDC sans devis correspondant → exclus du reporting (info de contrôle)
-    for (const mail of cmdByEmail.keys()) if (!seenDevis.has(mail)) orphelinsBdc++;
+    cmdByEmail.forEach((v, mail) => { if (!seenDevis.has(mail)) orphelinsBdc++; });
 
     const nbDevis = lines.length;
-    const ca = valTransfo; // CA = valeur HT des devis signés
+    const ca = valTransfo;
     const nbAttente = nbDevis - nbTransfo - nbAnnul;
     const valAttente = valDevis - valTransfo - valAnnul;
     const nbDecides = nbTransfo + nbAnnul;
@@ -386,41 +393,41 @@ function KpiTab() {
     const delaiAnnulMoy = delaisAnnul.length ? Math.round(delaisAnnul.reduce((a, b) => a + b, 0) / delaisAnnul.length) : null;
 
     return {
-      lines, hasAnnul, orphelinsBdc, nbDevis, valDevis,
-      nbTransfo, valTransfo, ca, delaiMoy, nbDelais: delais.length,
-      nbAnnul, valAnnul, delaiAnnulMoy, nbDelaisAnnul: delaisAnnul.length,
-      nbAttente, valAttente,
-      tauxNb, tauxVal, tauxAnnul, tauxAnnulVal, tauxAffine, tauxAffineVal,
+      lines: lines, hasAnnul: hasAnnul, orphelinsBdc: orphelinsBdc, nbDevis: nbDevis, valDevis: valDevis,
+      nbTransfo: nbTransfo, valTransfo: valTransfo, ca: ca, delaiMoy: delaiMoy, nbDelais: delais.length,
+      nbAnnul: nbAnnul, valAnnul: valAnnul, delaiAnnulMoy: delaiAnnulMoy, nbDelaisAnnul: delaisAnnul.length,
+      nbAttente: nbAttente, valAttente: valAttente,
+      tauxNb: tauxNb, tauxVal: tauxVal, tauxAnnul: tauxAnnul, tauxAnnulVal: tauxAnnulVal,
+      tauxAffine: tauxAffine, tauxAffineVal: tauxAffineVal,
     };
   }, [devis, cmd, annul]);
 
-  /* --- Exports --- */
   const tableTSV = useMemo(() => {
     if (!result) return "";
     const statutLbl = { signe: "Signé", annule: "Annulé", attente: "En attente" };
     const head = ["Client", "Email", "Montant HT", "Statut", "Délai (j)"].join("\t");
     const body = result.lines.map((l) =>
-      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.delai ?? ""].join("\t")
+      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.delai != null ? l.delai : ""].join("\t")
     );
-    return [head, ...body].join("\n");
+    return [head].concat(body).join("\n");
   }, [result]);
 
   const analyse = useMemo(() => {
     if (!result) return "";
     const r = result;
     let txt =
-      `Sur la période analysée, ${r.nbDevis} devis ont été envoyés pour une valeur totale de ${euro(r.valDevis)} HT. ` +
-      `${r.nbTransfo} ont donné lieu à un bon de commande, soit un taux de transformation de ${pct(r.tauxNb)} en volume et ${pct(r.tauxVal)} en valeur, ` +
-      `pour un chiffre d'affaires de ${euro(r.ca)} HT.`;
+      "Sur la période analysée, " + r.nbDevis + " devis ont été envoyés pour une valeur totale de " + euro(r.valDevis) + " HT. " +
+      r.nbTransfo + " ont donné lieu à un bon de commande, soit un taux de transformation de " + pct(r.tauxNb) + " en volume et " + pct(r.tauxVal) + " en valeur, " +
+      "pour un chiffre d'affaires de " + euro(r.ca) + " HT.";
 
     if (r.delaiMoy != null)
-      txt += ` Le délai moyen entre l'envoi et la signature est de ${r.delaiMoy} jour${r.delaiMoy > 1 ? "s" : ""} (sur ${r.nbDelais} signature${r.nbDelais > 1 ? "s" : ""} datée${r.nbDelais > 1 ? "s" : ""}).`;
+      txt += " Le délai moyen entre l'envoi et la signature est de " + r.delaiMoy + " jour" + (r.delaiMoy > 1 ? "s" : "") + " (sur " + r.nbDelais + " signature" + (r.nbDelais > 1 ? "s" : "") + " datée" + (r.nbDelais > 1 ? "s" : "") + ").";
 
     if (r.hasAnnul) {
-      txt += ` ${r.nbAnnul} devis ont été annulés via le formulaire, soit un taux d'annulation de ${pct(r.tauxAnnul)} en volume (${euro(r.valAnnul)} HT de devis perdus).`;
+      txt += " " + r.nbAnnul + " devis ont été annulés via le formulaire, soit un taux d'annulation de " + pct(r.tauxAnnul) + " en volume (" + euro(r.valAnnul) + " HT de devis perdus).";
       if (r.delaiAnnulMoy != null)
-        txt += ` Le délai moyen avant annulation est de ${r.delaiAnnulMoy} jour${r.delaiAnnulMoy > 1 ? "s" : ""}.`;
-      txt += ` En écartant les ${r.nbAttente} devis encore en attente, le taux de transformation sur devis tranchés s'établit à ${pct(r.tauxAffine)} en volume et ${pct(r.tauxAffineVal)} en valeur.`;
+        txt += " Le délai moyen avant annulation est de " + r.delaiAnnulMoy + " jour" + (r.delaiAnnulMoy > 1 ? "s" : "") + ".";
+      txt += " En écartant les " + r.nbAttente + " devis encore en attente, le taux de transformation sur devis tranchés s'établit à " + pct(r.tauxAffine) + " en volume et " + pct(r.tauxAffineVal) + " en valeur.";
     }
 
     let qualite;
@@ -457,7 +464,6 @@ function KpiTab() {
 
       {result && (
         <div style={{ marginTop: 18 }}>
-          {/* KPIs principaux */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
             <KpiCard label="Devis envoyés" main={String(result.nbDevis)} sub={euro(result.valDevis) + " HT"} accent={NAVY} />
             <KpiCard label="Devis signés" main={String(result.nbTransfo)} sub={euro(result.valTransfo) + " HT"} accent={GREEN} />
@@ -466,7 +472,6 @@ function KpiTab() {
             <KpiCard label="Délai moyen" main={result.delaiMoy != null ? result.delaiMoy + " j" : "—"} sub="envoi → signature" accent={AMBER} />
           </div>
 
-          {/* Volet annulation */}
           {result.hasAnnul && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginTop: 12 }}>
               <KpiCard label="Devis annulés" main={String(result.nbAnnul)} sub={euro(result.valAnnul) + " HT"} accent={RED} />
@@ -477,46 +482,42 @@ function KpiTab() {
             </div>
           )}
 
-          {/* Barre de répartition */}
           <Card style={{ marginTop: 14 }}>
             <Lbl>Répartition des devis (en volume)</Lbl>
-            <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden", border: `1px solid ${LINE}`, marginTop: 6 }}>
+            <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden", border: "1px solid " + LINE, marginTop: 6 }}>
               {result.nbTransfo > 0 && (
-                <Seg w={result.nbTransfo / result.nbDevis} bg={GREEN} fg="#fff" label={`${result.nbTransfo} signés`} />
+                <Seg w={result.nbTransfo / result.nbDevis} bg={GREEN} fg="#fff" label={result.nbTransfo + " signés"} />
               )}
               {result.hasAnnul && result.nbAnnul > 0 && (
-                <Seg w={result.nbAnnul / result.nbDevis} bg={RED} fg="#fff" label={`${result.nbAnnul} annulés`} />
+                <Seg w={result.nbAnnul / result.nbDevis} bg={RED} fg="#fff" label={result.nbAnnul + " annulés"} />
               )}
               {result.nbAttente > 0 && (
-                <Seg w={result.nbAttente / result.nbDevis} bg="#eef2f8" fg={INK} label={`${result.nbAttente} en attente`} />
+                <Seg w={result.nbAttente / result.nbDevis} bg="#eef2f8" fg={INK} label={result.nbAttente + " en attente"} />
               )}
             </div>
           </Card>
 
-          {/* Contrôle orphelins */}
           {result.orphelinsBdc > 0 && (
-            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#fff7ea", color: "#8a6516", fontSize: 12.5, border: `1px solid #f0e0c0` }}>
+            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#fff7ea", color: "#8a6516", fontSize: 12.5, border: "1px solid #f0e0c0" }}>
               {result.orphelinsBdc} bon{result.orphelinsBdc > 1 ? "s" : ""} de commande sans devis correspondant {result.orphelinsBdc > 1 ? "ont" : "a"} été exclu{result.orphelinsBdc > 1 ? "s" : ""} du reporting (aucun email associé dans les devis envoyés).
             </div>
           )}
 
-          {/* Analyse texte */}
           <Card style={{ marginTop: 14 }}>
             <Row>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Analyse</span>
               <CopyBtn done={copiedA} onClick={() => copyText(analyse, anaRef, setCopiedA, setError)} />
             </Row>
             <textarea ref={anaRef} readOnly value={analyse} onFocus={(e) => e.target.select()}
-              style={{ ...taStyle, minHeight: 130, fontFamily: "inherit", fontSize: 14, lineHeight: 1.55 }} />
+              style={Object.assign({}, taStyle, { minHeight: 130, fontFamily: "inherit", fontSize: 14, lineHeight: 1.55 })} />
           </Card>
 
-          {/* Tableau détaillé */}
           <Card style={{ marginTop: 14 }}>
             <Row>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Détail par devis</span>
               <CopyBtn done={copiedT} label="Copier le tableau" onClick={() => copyText(tableTSV, tblRef, setCopiedT, setError)} />
             </Row>
-            <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, borderRadius: 8 }}>
+            <div style={{ overflowX: "auto", border: "1px solid " + LINE, borderRadius: 8 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: "#f3f7fc" }}>
@@ -527,12 +528,12 @@ function KpiTab() {
                 </thead>
                 <tbody>
                   {result.lines.map((l, i) => (
-                    <tr key={i} style={{ borderTop: `1px solid ${LINE}` }}>
+                    <tr key={i} style={{ borderTop: "1px solid " + LINE }}>
                       <td style={td}>{l.nom || "—"}</td>
-                      <td style={{ ...td, color: INK }}>{l.mail}</td>
-                      <td style={{ ...td, textAlign: "right" }}>{euro(l.montantHT)}</td>
+                      <td style={Object.assign({}, td, { color: INK })}>{l.mail}</td>
+                      <td style={Object.assign({}, td, { textAlign: "right" })}>{euro(l.montantHT)}</td>
                       <td style={td}><StatutBadge statut={l.statut} /></td>
-                      <td style={{ ...td, textAlign: "right" }}>{l.delai != null ? l.delai + " j" : "—"}</td>
+                      <td style={Object.assign({}, td, { textAlign: "right" })}>{l.delai != null ? l.delai + " j" : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -555,41 +556,43 @@ function KpiTab() {
 
 function Seg({ w, bg, fg, label }) {
   return (
-    <div style={{ width: `${Math.max(w * 100, 0)}%`, background: bg, color: fg, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 44, whiteSpace: "nowrap", overflow: "hidden" }}>
+    <div style={{ width: Math.max(w * 100, 0) + "%", background: bg, color: fg, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 44, whiteSpace: "nowrap", overflow: "hidden" }}>
       {label}
     </div>
   );
 }
 function StatutBadge({ statut }) {
-  const cfg = {
+  const all = {
     signe: { txt: "Signé", c: GREEN, bg: "#e7f5ed" },
     annule: { txt: "Annulé", c: RED, bg: "#fdecee" },
     attente: { txt: "En attente", c: INK, bg: "#eef2f8" },
-  }[statut];
+  };
+  const cfg = all[statut];
   return <span style={{ fontSize: 12, fontWeight: 700, color: cfg.c, background: cfg.bg, padding: "2px 8px", borderRadius: 20 }}>{cfg.txt}</span>;
 }
 
-/* ---------- Slot fichier (onglet KPI) ---------- */
-function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant = true, optional, data, onFile, onReset, onMap }) {
+function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant, optional, data, onFile, onReset, onMap }) {
   const [dragOver, setDragOver] = useState(false);
-  const fields = [
+  const withMontant = showMontant !== false;
+  let fields = [
     ["nom", "Client / nom"],
     ["email", "Email"],
     ["date", dateLabel || "Date"],
-    ...(showMontant ? [["montant", montantLabel || "Montant"]] : []),
   ];
+  if (withMontant) fields.push(["montant", montantLabel || "Montant"]);
+  const boxStyle = Object.assign({}, cardStyle, { padding: 14 }, optional ? { borderStyle: "dashed" } : {});
   return (
-    <div style={{ ...cardStyle, padding: 14, ...(optional ? { borderStyle: "dashed" } : {}) }}>
+    <div style={boxStyle}>
       <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>{title}</div>
       <div style={{ fontSize: 12, color: INK, marginBottom: 10 }}>{subtitle}</div>
       {!data ? (
         <label
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files?.[0]); }}
-          style={{ display: "block", border: `2px dashed ${dragOver ? BLUE : "#cdd6e4"}`, borderRadius: 10, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "26px 12px", textAlign: "center", cursor: "pointer" }}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files[0]); }}
+          style={{ display: "block", border: "2px dashed " + (dragOver ? BLUE : "#cdd6e4"), borderRadius: 10, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "26px 12px", textAlign: "center", cursor: "pointer" }}
         >
-          <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
+          <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files[0])} />
           <div style={{ fontSize: 13, fontWeight: 600 }}>Déposer le fichier</div>
           <div style={{ fontSize: 11.5, color: INK, marginTop: 3 }}>.xlsx, .xls, .csv</div>
         </label>
@@ -599,12 +602,12 @@ function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant = true
             <span style={{ fontSize: 12, color: INK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>
               {data.name} · {data.rows.length} l.
             </span>
-            <button onClick={onReset} style={{ ...ghostBtn, padding: "4px 9px", fontSize: 11 }}>Changer</button>
+            <button onClick={onReset} style={Object.assign({}, ghostBtn, { padding: "4px 9px", fontSize: 11 })}>Changer</button>
           </div>
-          {fields.map(([f, lbl]) => (
-            <div key={f} style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 11.5, color: INK, marginBottom: 3 }}>{lbl}</div>
-              <Select value={data.map[f]} onChange={(v) => onMap(f, v)} options={["", ...data.headers]} small />
+          {fields.map((f) => (
+            <div key={f[0]} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11.5, color: INK, marginBottom: 3 }}>{f[1]}</div>
+              <Select value={data.map[f[0]]} onChange={(v) => onMap(f[0], v)} options={[""].concat(data.headers)} small />
             </div>
           ))}
         </div>
@@ -613,7 +616,6 @@ function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant = true
   );
 }
 
-/* ---------- Composants UI réutilisables ---------- */
 function Intro({ title, text }) {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -627,10 +629,10 @@ function Drop({ dragOver, setDragOver, onFile }) {
     <label
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files?.[0]); }}
-      style={{ display: "block", border: `2px dashed ${dragOver ? BLUE : "#cdd6e4"}`, borderRadius: 12, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "44px 24px", textAlign: "center", cursor: "pointer" }}
+      onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files[0]); }}
+      style={{ display: "block", border: "2px dashed " + (dragOver ? BLUE : "#cdd6e4"), borderRadius: 12, background: dragOver ? "#eef6fc" : "#fafbfd", padding: "44px 24px", textAlign: "center", cursor: "pointer" }}
     >
-      <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
+      <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => onFile(e.target.files[0])} />
       <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Glisse ton fichier ici</div>
       <div style={{ fontSize: 13, color: INK }}>ou clique pour le sélectionner — .xlsx, .xls, .csv</div>
     </label>
@@ -644,7 +646,7 @@ function FileBar({ name, count, onReset }) {
     </div>
   );
 }
-function Card({ children, style }) { return <div style={{ ...cardStyle, ...style }}>{children}</div>; }
+function Card({ children, style }) { return <div style={Object.assign({}, cardStyle, style)}>{children}</div>; }
 function Row({ children }) { return <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>{children}</div>; }
 function Lbl({ children }) { return <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{children}</label>; }
 function Hint({ children }) { return <p style={{ fontSize: 12, color: INK, margin: "10px 0 0", lineHeight: 1.6 }}>{children}</p>; }
@@ -659,7 +661,7 @@ function Select({ value, onChange, options, small }) {
 }
 function Stat({ label, value, accent, hint }) {
   return (
-    <div style={{ flex: 1, ...cardStyle, padding: "12px 14px" }}>
+    <div style={Object.assign({ flex: 1 }, cardStyle, { padding: "12px 14px" })}>
       <div style={{ fontSize: 26, fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums" }}>{value}</div>
       <div style={{ fontSize: 12, color: INK, marginTop: 2 }}>{label}</div>
       {hint && <div style={{ fontSize: 11, color: "#94a0b5", marginTop: 2 }}>{hint}</div>}
@@ -668,21 +670,26 @@ function Stat({ label, value, accent, hint }) {
 }
 function KpiCard({ label, main, sub, accent }) {
   return (
-    <div style={{ ...cardStyle, padding: "14px 16px", borderTop: `3px solid ${accent}` }}>
+    <div style={Object.assign({}, cardStyle, { padding: "14px 16px", borderTop: "3px solid " + accent })}>
       <div style={{ fontSize: 11.5, color: INK, textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 600 }}>{label}</div>
       <div style={{ fontSize: 24, fontWeight: 800, color: accent, margin: "4px 0 1px", fontVariantNumeric: "tabular-nums" }}>{main}</div>
       <div style={{ fontSize: 12, color: INK }}>{sub}</div>
     </div>
   );
 }
-function CopyBtn({ done, onClick, label = "Copier" }) {
-  return <button onClick={onClick} style={primaryBtn}>{done ? "Copié ✓" : label}</button>;
+function CopyBtn({ done, onClick, label }) {
+  return <button onClick={onClick} style={primaryBtn}>{done ? "Copié ✓" : (label || "Copier")}</button>;
 }
 
 /* ---------- Styles ---------- */
-const cardStyle = { border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, background: "#fff", boxShadow: "0 1px 2px rgba(29,46,77,.04)" };
-const taStyle = { width: "100%", minHeight: 190, resize: "vertical", fontFamily: "Menlo, Consolas, monospace", fontSize: 13, lineHeight: 1.5, color: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12, boxSizing: "border-box", background: "#fbfcfe" };
+const cardStyle = { border: "1px solid " + LINE, borderRadius: 12, padding: 16, background: "#fff", boxShadow: "0 1px 2px rgba(29,46,77,.04)" };
+const taStyle = { width: "100%", minHeight: 190, resize: "vertical", fontFamily: "Menlo, Consolas, monospace", fontSize: 13, lineHeight: 1.5, color: NAVY, border: "1px solid " + LINE, borderRadius: 8, padding: 12, boxSizing: "border-box", background: "#fbfcfe" };
 const th = { textAlign: "left", padding: "9px 10px", fontSize: 11.5, fontWeight: 700, color: INK, whiteSpace: "nowrap" };
 const td = { padding: "8px 10px", verticalAlign: "middle" };
 const primaryBtn = { background: BLUE, color: "#fff", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" };
-const ghostBtn = { background: "transparent", color: BLUE_DEEP, border: `1px solid ${BLUE}`, borderRadius: 7, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
+const ghostBtn = { background: "transparent", color: BLUE_DEEP, border: "1px solid " + BLUE, borderRadius: 7, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
