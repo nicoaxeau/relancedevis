@@ -23,6 +23,7 @@ const BLUE_DEEP = "#3E7CB1";
 const GREEN = "#2E9E5B";
 const AMBER = "#C9923E";
 const RED = "#C0444B";
+const PURPLE = "#7B5EA7";
 const INK = "#52607a";
 const LINE = "#e3e9f2";
 const BG = "#F4F8FC";
@@ -59,8 +60,15 @@ function parseDateValue(v) {
 }
 const euro = (n) =>
   (n || 0).toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
+const euroShort = (n) => {
+  n = n || 0;
+  if (Math.abs(n) >= 1000000) return (n / 1000000).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " M€";
+  if (Math.abs(n) >= 1000) return Math.round(n / 1000) + " k€";
+  return Math.round(n) + " €";
+};
 const pct = (n) =>
   (isFinite(n) ? n * 100 : 0).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " %";
+const pctShort = (n) => Math.round((isFinite(n) ? n : 0) * 100) + " %";
 
 function guessCol(headers, sample, regex, needsAt) {
   const byName = headers.find((h) => regex.test(String(h)));
@@ -109,6 +117,119 @@ async function copyText(text, fallbackRef, setFlag, setErr) {
     }
     setErr("Copie bloquée par le navigateur — le texte est sélectionné, fais Ctrl/Cmd + C.");
   }
+}
+
+/* ---------- Découpage temporel ---------- */
+const MOIS = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+function dayStart(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function fmtJour(d) {
+  return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
+}
+
+function buildBuckets(lines) {
+  const dated = lines.filter((l) => l.date);
+  if (dated.length < 2) return { ok: false, reason: "nodate", spanDays: 0 };
+  let min = dated[0].date, max = dated[0].date;
+  for (const l of dated) {
+    if (l.date < min) min = l.date;
+    if (l.date > max) max = l.date;
+  }
+  const spanDays = Math.round((dayStart(max) - dayStart(min)) / 86400000) + 1;
+  if (spanDays < 14) return { ok: false, reason: "short", spanDays: spanDays };
+
+  const mode = spanDays <= 60 ? "week" : "month";
+  const buckets = [];
+  const keyOf = (d) => {
+    if (mode === "month") return d.getFullYear() + "-" + d.getMonth();
+    const diff = Math.floor((dayStart(d) - dayStart(min)) / 86400000);
+    return "w" + Math.floor(diff / 7);
+  };
+  const labelOf = (d) => {
+    if (mode === "month") return MOIS[d.getMonth()] + " " + String(d.getFullYear()).slice(2);
+    const diff = Math.floor((dayStart(d) - dayStart(min)) / 86400000);
+    const start = new Date(dayStart(min).getTime() + Math.floor(diff / 7) * 7 * 86400000);
+    return fmtJour(start);
+  };
+  const index = new Map();
+  for (const l of dated) {
+    const k = keyOf(l.date);
+    if (!index.has(k)) {
+      const b = {
+        key: k, label: labelOf(l.date), sort: l.date.getTime(),
+        nbDevis: 0, nbSigne: 0, nbAnnul: 0, nbMonetico: 0,
+        valDevis: 0, valSigne: 0, valAnnul: 0, valMonetico: 0,
+      };
+      index.set(k, b);
+      buckets.push(b);
+    }
+    const b = index.get(k);
+    if (l.date.getTime() < b.sort) b.sort = l.date.getTime();
+    b.nbDevis++;
+    b.valDevis += l.montantHT;
+    if (l.statut === "signe") {
+      b.nbSigne++; b.valSigne += l.montantHT;
+      if (l.monetico) { b.nbMonetico++; b.valMonetico += l.montantHT; }
+    } else if (l.statut === "annule") {
+      b.nbAnnul++; b.valAnnul += l.montantHT;
+    }
+  }
+  buckets.sort((a, b) => a.sort - b.sort);
+  return { ok: true, mode: mode, spanDays: spanDays, buckets: buckets, sansDate: lines.length - dated.length };
+}
+
+/* ---------- Graphique SVG ---------- */
+function Chart({ buckets, series, fmt, height }) {
+  const W = 720, H = height || 250;
+  const padL = 62, padR = 14, padT = 16, padB = 42;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const n = buckets.length;
+
+  let max = 0;
+  series.forEach((s) => s.values.forEach((v) => { if (v > max) max = v; }));
+  if (max <= 0) max = 1;
+  max = max * 1.12;
+
+  const X = (i) => padL + (n <= 1 ? iw / 2 : (iw * i) / (n - 1));
+  const Y = (v) => padT + ih - (ih * v) / max;
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  const step = n > 10 ? Math.ceil(n / 8) : 1;
+
+  return (
+    <div>
+      <svg viewBox={"0 0 " + W + " " + H} style={{ width: "100%", height: "auto", display: "block" }}>
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padL} x2={W - padR} y1={Y(max * t)} y2={Y(max * t)} stroke={LINE} strokeWidth="1" />
+            <text x={padL - 8} y={Y(max * t) + 4} textAnchor="end" fontSize="11" fill={INK}>{fmt(max * t)}</text>
+          </g>
+        ))}
+        {buckets.map((b, i) => (
+          i % step === 0 ? (
+            <text key={i} x={X(i)} y={H - 22} textAnchor="middle" fontSize="11" fill={INK}>{b.label}</text>
+          ) : null
+        ))}
+        {series.map((s, si) => (
+          <g key={si}>
+            <polyline
+              fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+              points={s.values.map((v, i) => X(i) + "," + Y(v)).join(" ")}
+            />
+            {s.values.map((v, i) => (
+              <circle key={i} cx={X(i)} cy={Y(v)} r="3.5" fill="#fff" stroke={s.color} strokeWidth="2" />
+            ))}
+          </g>
+        ))}
+      </svg>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "center", marginTop: 4 }}>
+        {series.map((s, i) => (
+          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: INK }}>
+            <span style={{ width: 14, height: 3, background: s.color, borderRadius: 2, display: "inline-block" }}></span>
+            {s.name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /* ===================================================================== */
@@ -265,6 +386,7 @@ function KpiTab() {
   const [devis, setDevis] = useState(null);
   const [cmd, setCmd] = useState(null);
   const [annul, setAnnul] = useState(null);
+  const [mone, setMone] = useState(null);
   const [error, setError] = useState("");
   const [copiedT, setCopiedT] = useState(false);
   const [copiedA, setCopiedA] = useState(false);
@@ -285,7 +407,7 @@ function KpiTab() {
         const map = {
           nom: guessCol(headers, sample, /nom|client|raison|soci/i, false),
           email: guessCol(headers, sample, /e-?mail|courriel|adresse/i, true),
-          date: guessCol(headers, sample, /date|envoi|sign|command|annul|soumis/i, false),
+          date: guessCol(headers, sample, /date|envoi|sign|command|annul|soumis|paie|transac/i, false),
           montant: guessMontantCol(headers, sample),
         };
         setter({ rows: json, headers: headers, name: file.name, map: map });
@@ -296,52 +418,51 @@ function KpiTab() {
   };
 
   const setMap = (which, field, value) => {
-    const obj = which === "devis" ? devis : which === "cmd" ? cmd : annul;
-    const setter = which === "devis" ? setDevis : which === "cmd" ? setCmd : setAnnul;
+    const objs = { devis: devis, cmd: cmd, annul: annul, mone: mone };
+    const setters = { devis: setDevis, cmd: setCmd, annul: setAnnul, mone: setMone };
+    const obj = objs[which], setter = setters[which];
     const newMap = Object.assign({}, obj.map);
     newMap[field] = value;
     setter(Object.assign({}, obj, { map: newMap }));
   };
 
   /* Source de vérité = fichier 1 (devis envoyés). La colonne Montant HT du
-     devis donne TOUTES les valeurs. Les fichiers 2 et 3 ne servent qu'à
-     attribuer un statut via l'email. BDC/annulation sans devis = ignoré. */
+     devis donne TOUTES les valeurs. Les fichiers 2, 3 et 4 ne servent qu'à
+     attribuer statut et mode de paiement via l'email. Sans devis = ignoré. */
   const result = useMemo(() => {
     if (!devis || !cmd) return null;
     const dm = devis.map, cm = cmd.map;
     if (!dm.email || !dm.montant || !cm.email) return null;
 
     const hasAnnul = !!(annul && annul.map.email);
+    const hasMone = !!(mone && mone.map.email);
     const am = annul ? annul.map : null;
+    const mm = mone ? mone.map : null;
 
-    const cmdByEmail = new Map();
-    for (const r of cmd.rows) {
-      const mail = String(r[cm.email] || "").trim().toLowerCase();
-      if (!mail) continue;
-      const date = cm.date ? parseDateValue(r[cm.date]) : null;
-      if (!cmdByEmail.has(mail)) cmdByEmail.set(mail, { date: null });
-      const e = cmdByEmail.get(mail);
-      if (date && (!e.date || date < e.date)) e.date = date;
-    }
-
-    const annulByEmail = new Map();
-    if (hasAnnul) {
-      for (const r of annul.rows) {
-        const mail = String(r[am.email] || "").trim().toLowerCase();
+    const indexer = (src, map) => {
+      const idx = new Map();
+      for (const r of src.rows) {
+        const mail = String(r[map.email] || "").trim().toLowerCase();
         if (!mail) continue;
-        const date = am.date ? parseDateValue(r[am.date]) : null;
-        if (!annulByEmail.has(mail)) annulByEmail.set(mail, { date: null });
-        const e = annulByEmail.get(mail);
+        const date = map.date ? parseDateValue(r[map.date]) : null;
+        if (!idx.has(mail)) idx.set(mail, { date: null });
+        const e = idx.get(mail);
         if (date && (!e.date || date < e.date)) e.date = date;
       }
-    }
+      return idx;
+    };
+
+    const cmdByEmail = indexer(cmd, cm);
+    const annulByEmail = hasAnnul ? indexer(annul, am) : new Map();
+    const moneByEmail = hasMone ? indexer(mone, mm) : new Map();
 
     const lines = [];
     let valDevis = 0, valTransfo = 0, nbTransfo = 0;
     let nbAnnul = 0, valAnnul = 0;
-    const delais = [], delaisAnnul = [];
+    let nbMonetico = 0, valMonetico = 0;
+    const delais = [], delaisAnnul = [], delaisPaie = [];
     const seenDevis = new Set();
-    let orphelinsBdc = 0;
+    let orphelinsBdc = 0, orphelinsMone = 0;
 
     for (const r of devis.rows) {
       const mail = String(r[dm.email] || "").trim().toLowerCase();
@@ -354,14 +475,27 @@ function KpiTab() {
 
       const mCmd = cmdByEmail.get(mail);
       const mAnnul = hasAnnul ? annulByEmail.get(mail) : null;
+      const mMone = hasMone ? moneByEmail.get(mail) : null;
 
-      let statut = "attente", delai = null;
+      let statut = "attente", delai = null, paye = false;
 
-      if (mCmd) {
+      // un paiement Monetico vaut acceptation : le devis est signé
+      if (mCmd || mMone) {
         statut = "signe"; nbTransfo++; valTransfo += montantHT;
-        if (dateDevis && mCmd.date) {
-          const d = Math.round((mCmd.date - dateDevis) / 86400000);
+        const dSign = mCmd ? mCmd.date : null;
+        if (dateDevis && dSign) {
+          const d = Math.round((dSign - dateDevis) / 86400000);
           if (d >= 0) { delai = d; delais.push(d); }
+        }
+        if (mMone) {
+          paye = true; nbMonetico++; valMonetico += montantHT;
+          if (dateDevis && mMone.date) {
+            const d = Math.round((mMone.date - dateDevis) / 86400000);
+            if (d >= 0) {
+              delaisPaie.push(d);
+              if (delai == null) delai = d;
+            }
+          }
         }
       } else if (mAnnul) {
         statut = "annule"; nbAnnul++; valAnnul += montantHT;
@@ -370,10 +504,11 @@ function KpiTab() {
           if (d >= 0) { delai = d; delaisAnnul.push(d); }
         }
       }
-      lines.push({ nom: nom, mail: mail, montantHT: montantHT, statut: statut, delai: delai });
+      lines.push({ nom: nom, mail: mail, montantHT: montantHT, statut: statut, delai: delai, monetico: paye, date: dateDevis });
     }
 
     cmdByEmail.forEach((v, mail) => { if (!seenDevis.has(mail)) orphelinsBdc++; });
+    moneByEmail.forEach((v, mail) => { if (!seenDevis.has(mail)) orphelinsMone++; });
 
     const nbDevis = lines.length;
     const ca = valTransfo;
@@ -388,26 +523,34 @@ function KpiTab() {
     const tauxAnnulVal = valDevis ? valAnnul / valDevis : 0;
     const tauxAffine = nbDecides ? nbTransfo / nbDecides : 0;
     const tauxAffineVal = valDecides ? valTransfo / valDecides : 0;
+    const partMone = nbTransfo ? nbMonetico / nbTransfo : 0;
+    const partMoneVal = valTransfo ? valMonetico / valTransfo : 0;
 
-    const delaiMoy = delais.length ? Math.round(delais.reduce((a, b) => a + b, 0) / delais.length) : null;
-    const delaiAnnulMoy = delaisAnnul.length ? Math.round(delaisAnnul.reduce((a, b) => a + b, 0) / delaisAnnul.length) : null;
+    const moy = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+
+    const graph = buildBuckets(lines);
 
     return {
-      lines: lines, hasAnnul: hasAnnul, orphelinsBdc: orphelinsBdc, nbDevis: nbDevis, valDevis: valDevis,
-      nbTransfo: nbTransfo, valTransfo: valTransfo, ca: ca, delaiMoy: delaiMoy, nbDelais: delais.length,
-      nbAnnul: nbAnnul, valAnnul: valAnnul, delaiAnnulMoy: delaiAnnulMoy, nbDelaisAnnul: delaisAnnul.length,
+      lines: lines, hasAnnul: hasAnnul, hasMone: hasMone, graph: graph,
+      orphelinsBdc: orphelinsBdc, orphelinsMone: orphelinsMone,
+      nbDevis: nbDevis, valDevis: valDevis,
+      nbTransfo: nbTransfo, valTransfo: valTransfo, ca: ca,
+      delaiMoy: moy(delais), nbDelais: delais.length,
+      nbAnnul: nbAnnul, valAnnul: valAnnul, delaiAnnulMoy: moy(delaisAnnul),
+      nbMonetico: nbMonetico, valMonetico: valMonetico, delaiPaieMoy: moy(delaisPaie),
+      partMone: partMone, partMoneVal: partMoneVal,
       nbAttente: nbAttente, valAttente: valAttente,
       tauxNb: tauxNb, tauxVal: tauxVal, tauxAnnul: tauxAnnul, tauxAnnulVal: tauxAnnulVal,
       tauxAffine: tauxAffine, tauxAffineVal: tauxAffineVal,
     };
-  }, [devis, cmd, annul]);
+  }, [devis, cmd, annul, mone]);
 
   const tableTSV = useMemo(() => {
     if (!result) return "";
     const statutLbl = { signe: "Signé", annule: "Annulé", attente: "En attente" };
-    const head = ["Client", "Email", "Montant HT", "Statut", "Délai (j)"].join("\t");
+    const head = ["Client", "Email", "Montant HT", "Statut", "Paiement CB", "Délai (j)"].join("\t");
     const body = result.lines.map((l) =>
-      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.delai != null ? l.delai : ""].join("\t")
+      [l.nom, l.mail, Math.round(l.montantHT), statutLbl[l.statut], l.monetico ? "Monetico" : "", l.delai != null ? l.delai : ""].join("\t")
     );
     return [head].concat(body).join("\n");
   }, [result]);
@@ -417,17 +560,23 @@ function KpiTab() {
     const r = result;
     let txt =
       "Sur la période analysée, " + r.nbDevis + " devis ont été envoyés pour une valeur totale de " + euro(r.valDevis) + " HT. " +
-      r.nbTransfo + " ont donné lieu à un bon de commande, soit un taux de transformation de " + pct(r.tauxNb) + " en volume et " + pct(r.tauxVal) + " en valeur, " +
+      r.nbTransfo + " ont été acceptés, soit un taux de transformation de " + pct(r.tauxNb) + " en volume et " + pct(r.tauxVal) + " en valeur, " +
       "pour un chiffre d'affaires de " + euro(r.ca) + " HT.";
 
     if (r.delaiMoy != null)
-      txt += " Le délai moyen entre l'envoi et la signature est de " + r.delaiMoy + " jour" + (r.delaiMoy > 1 ? "s" : "") + " (sur " + r.nbDelais + " signature" + (r.nbDelais > 1 ? "s" : "") + " datée" + (r.nbDelais > 1 ? "s" : "") + ").";
+      txt += " Le délai moyen entre l'envoi et la signature est de " + r.delaiMoy + " jour" + (r.delaiMoy > 1 ? "s" : "") + ".";
 
     if (r.hasAnnul) {
       txt += " " + r.nbAnnul + " devis ont été annulés via le formulaire, soit un taux d'annulation de " + pct(r.tauxAnnul) + " en volume (" + euro(r.valAnnul) + " HT de devis perdus).";
       if (r.delaiAnnulMoy != null)
         txt += " Le délai moyen avant annulation est de " + r.delaiAnnulMoy + " jour" + (r.delaiAnnulMoy > 1 ? "s" : "") + ".";
       txt += " En écartant les " + r.nbAttente + " devis encore en attente, le taux de transformation sur devis tranchés s'établit à " + pct(r.tauxAffine) + " en volume et " + pct(r.tauxAffineVal) + " en valeur.";
+    }
+
+    if (r.hasMone) {
+      txt += " Côté encaissement, " + r.nbMonetico + " devis ont été réglés par carte via Monetico, soit " + pct(r.partMone) + " des devis acceptés en volume et " + pct(r.partMoneVal) + " en valeur (" + euro(r.valMonetico) + " HT).";
+      if (r.delaiPaieMoy != null)
+        txt += " Le délai moyen entre l'envoi du devis et le paiement en ligne est de " + r.delaiPaieMoy + " jour" + (r.delaiPaieMoy > 1 ? "s" : "") + ".";
     }
 
     let qualite;
@@ -444,16 +593,18 @@ function KpiTab() {
     <div>
       <Intro
         title="Analyser la performance"
-        text="Dépose les exports sur une même période : les devis envoyés (Vision), les bons de commande (Vision), et — optionnel — les annulations de devis (export Gravity Forms). Tous les montants proviennent de la colonne Montant HT des devis ; les fichiers 2 et 3 ne servent qu'à déterminer le statut via l'email. Seuls les devis envoyés comptent dans le reporting."
+        text="Dépose les exports sur une même période : les devis envoyés (Vision), les bons de commande (Vision), les annulations (Gravity Forms) et les paiements CB (Monetico). Tous les montants proviennent de la colonne Montant HT des devis ; les autres fichiers ne servent qu'à déterminer statut et mode de règlement via l'email. Seuls les devis envoyés comptent dans le reporting."
       />
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginBottom: 4 }}>
-        <FileSlot title="1 · Devis envoyés" subtitle="Vision — nom, email, date, Montant HT (référence)" dateLabel="Date d'envoi" montantLabel="Montant Hors-Taxe" data={devis}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, marginBottom: 4 }}>
+        <FileSlot title="1 · Devis envoyés" subtitle="Vision — Montant HT (référence)" dateLabel="Date d'envoi" montantLabel="Montant Hors-Taxe" data={devis}
           onFile={(f) => loadFile(f, setDevis)} onReset={() => setDevis(null)} onMap={(field, v) => setMap("devis", field, v)} />
-        <FileSlot title="2 · Bons de commande" subtitle="Vision — email + date de signature" dateLabel="Date de signature" showMontant={false} data={cmd}
+        <FileSlot title="2 · Bons de commande" subtitle="Vision — email + date" dateLabel="Date de signature" showMontant={false} data={cmd}
           onFile={(f) => loadFile(f, setCmd)} onReset={() => setCmd(null)} onMap={(field, v) => setMap("cmd", field, v)} />
-        <FileSlot title="3 · Annulations de devis" subtitle="optionnel — export Gravity : email + date" dateLabel="Date d'annulation" showMontant={false} optional data={annul}
+        <FileSlot title="3 · Annulations" subtitle="optionnel — Gravity Forms" dateLabel="Date d'annulation" showMontant={false} optional data={annul}
           onFile={(f) => loadFile(f, setAnnul)} onReset={() => setAnnul(null)} onMap={(field, v) => setMap("annul", field, v)} />
+        <FileSlot title="4 · Paiements Monetico" subtitle="optionnel — règlements CB" dateLabel="Date de paiement" showMontant={false} optional data={mone}
+          onFile={(f) => loadFile(f, setMone)} onReset={() => setMone(null)} onMap={(field, v) => setMap("mone", field, v)} />
       </div>
 
       {error && <ErrorBox>{error}</ErrorBox>}
@@ -464,14 +615,16 @@ function KpiTab() {
 
       {result && (
         <div style={{ marginTop: 18 }}>
+          {/* KPIs principaux */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
             <KpiCard label="Devis envoyés" main={String(result.nbDevis)} sub={euro(result.valDevis) + " HT"} accent={NAVY} />
-            <KpiCard label="Devis signés" main={String(result.nbTransfo)} sub={euro(result.valTransfo) + " HT"} accent={GREEN} />
+            <KpiCard label="Devis acceptés" main={String(result.nbTransfo)} sub={euro(result.valTransfo) + " HT"} accent={GREEN} />
             <KpiCard label="Taux de transfo." main={pct(result.tauxNb)} sub={pct(result.tauxVal) + " en valeur"} accent={BLUE_DEEP} />
-            <KpiCard label="CA généré (HT)" main={euro(result.ca)} sub="= devis signés" accent={GREEN} />
+            <KpiCard label="CA généré (HT)" main={euro(result.ca)} sub="= devis acceptés" accent={GREEN} />
             <KpiCard label="Délai moyen" main={result.delaiMoy != null ? result.delaiMoy + " j" : "—"} sub="envoi → signature" accent={AMBER} />
           </div>
 
+          {/* Volet annulation */}
           {result.hasAnnul && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginTop: 12 }}>
               <KpiCard label="Devis annulés" main={String(result.nbAnnul)} sub={euro(result.valAnnul) + " HT"} accent={RED} />
@@ -482,11 +635,23 @@ function KpiTab() {
             </div>
           )}
 
+          {/* Volet Monetico */}
+          {result.hasMone && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginTop: 12 }}>
+              <KpiCard label="Réglés par CB" main={String(result.nbMonetico)} sub={euro(result.valMonetico) + " HT"} accent={PURPLE} />
+              <KpiCard label="Part Monetico" main={pct(result.partMone)} sub="des devis acceptés" accent={PURPLE} />
+              <KpiCard label="Part Monetico (valeur)" main={pct(result.partMoneVal)} sub="du CA généré" accent={PURPLE} />
+              <KpiCard label="Autres règlements" main={String(result.nbTransfo - result.nbMonetico)} sub={euro(result.valTransfo - result.valMonetico) + " HT"} accent={INK} />
+              <KpiCard label="Délai paiement CB" main={result.delaiPaieMoy != null ? result.delaiPaieMoy + " j" : "—"} sub="envoi → paiement" accent={AMBER} />
+            </div>
+          )}
+
+          {/* Barre de répartition */}
           <Card style={{ marginTop: 14 }}>
             <Lbl>Répartition des devis (en volume)</Lbl>
             <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden", border: "1px solid " + LINE, marginTop: 6 }}>
               {result.nbTransfo > 0 && (
-                <Seg w={result.nbTransfo / result.nbDevis} bg={GREEN} fg="#fff" label={result.nbTransfo + " signés"} />
+                <Seg w={result.nbTransfo / result.nbDevis} bg={GREEN} fg="#fff" label={result.nbTransfo + " acceptés"} />
               )}
               {result.hasAnnul && result.nbAnnul > 0 && (
                 <Seg w={result.nbAnnul / result.nbDevis} bg={RED} fg="#fff" label={result.nbAnnul + " annulés"} />
@@ -497,21 +662,71 @@ function KpiTab() {
             </div>
           </Card>
 
-          {result.orphelinsBdc > 0 && (
-            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#fff7ea", color: "#8a6516", fontSize: 12.5, border: "1px solid #f0e0c0" }}>
-              {result.orphelinsBdc} bon{result.orphelinsBdc > 1 ? "s" : ""} de commande sans devis correspondant {result.orphelinsBdc > 1 ? "ont" : "a"} été exclu{result.orphelinsBdc > 1 ? "s" : ""} du reporting (aucun email associé dans les devis envoyés).
+          {/* Graphiques d'évolution */}
+          <Card style={{ marginTop: 14 }}>
+            <Lbl>Évolution dans le temps</Lbl>
+            {result.graph.ok ? (
+              <div>
+                <p style={{ fontSize: 12, color: INK, margin: "0 0 12px" }}>
+                  Découpage {result.graph.mode === "week" ? "hebdomadaire" : "mensuel"} sur {result.graph.spanDays} jours, d'après la date d'envoi des devis.
+                </p>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, margin: "6px 0" }}>Taux (%)</div>
+                <Chart
+                  buckets={result.graph.buckets}
+                  fmt={pctShort}
+                  series={[
+                    { name: "Taux de transformation", color: GREEN, values: result.graph.buckets.map((b) => b.nbDevis ? b.nbSigne / b.nbDevis : 0) },
+                  ].concat(result.hasAnnul ? [
+                    { name: "Taux d'annulation", color: RED, values: result.graph.buckets.map((b) => b.nbDevis ? b.nbAnnul / b.nbDevis : 0) }
+                  ] : []).concat(result.hasMone ? [
+                    { name: "Part Monetico (sur acceptés)", color: PURPLE, values: result.graph.buckets.map((b) => b.nbSigne ? b.nbMonetico / b.nbSigne : 0) }
+                  ] : [])}
+                />
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, margin: "18px 0 6px" }}>Volumes financiers (HT)</div>
+                <Chart
+                  buckets={result.graph.buckets}
+                  fmt={euroShort}
+                  series={[
+                    { name: "Valeur devis envoyés", color: BLUE_DEEP, values: result.graph.buckets.map((b) => b.valDevis) },
+                    { name: "CA généré", color: GREEN, values: result.graph.buckets.map((b) => b.valSigne) },
+                  ].concat(result.hasMone ? [
+                    { name: "Encaissé via Monetico", color: PURPLE, values: result.graph.buckets.map((b) => b.valMonetico) }
+                  ] : [])}
+                />
+                {result.graph.sansDate > 0 && (
+                  <p style={{ fontSize: 11.5, color: "#94a0b5", marginTop: 12 }}>
+                    {result.graph.sansDate} devis sans date d'envoi exploitable ne figurent pas dans les courbes.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div style={{ padding: "22px 16px", borderRadius: 8, background: "#f7fafd", border: "1px dashed #cdd6e4", textAlign: "center", color: INK, fontSize: 13, lineHeight: 1.6 }}>
+                {result.graph.reason === "nodate"
+                  ? "Pour afficher les courbes, sélectionne la colonne « Date d'envoi » dans le fichier des devis envoyés."
+                  : "Pour des données graphiques, merci de présenter des données sur au moins 14 jours (période actuelle : " + result.graph.spanDays + " jour" + (result.graph.spanDays > 1 ? "s" : "") + ")."}
+              </div>
+            )}
+          </Card>
+
+          {/* Contrôles orphelins */}
+          {(result.orphelinsBdc > 0 || result.orphelinsMone > 0) && (
+            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#fff7ea", color: "#8a6516", fontSize: 12.5, border: "1px solid #f0e0c0", lineHeight: 1.6 }}>
+              {result.orphelinsBdc > 0 && (<div>{result.orphelinsBdc} bon(s) de commande sans devis correspondant : exclus du reporting.</div>)}
+              {result.orphelinsMone > 0 && (<div>{result.orphelinsMone} paiement(s) Monetico sans devis correspondant : exclus du reporting.</div>)}
             </div>
           )}
 
+          {/* Analyse texte */}
           <Card style={{ marginTop: 14 }}>
             <Row>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Analyse</span>
               <CopyBtn done={copiedA} onClick={() => copyText(analyse, anaRef, setCopiedA, setError)} />
             </Row>
             <textarea ref={anaRef} readOnly value={analyse} onFocus={(e) => e.target.select()}
-              style={Object.assign({}, taStyle, { minHeight: 130, fontFamily: "inherit", fontSize: 14, lineHeight: 1.55 })} />
+              style={Object.assign({}, taStyle, { minHeight: 150, fontFamily: "inherit", fontSize: 14, lineHeight: 1.55 })} />
           </Card>
 
+          {/* Tableau détaillé */}
           <Card style={{ marginTop: 14 }}>
             <Row>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Détail par devis</span>
@@ -521,7 +736,7 @@ function KpiTab() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: "#f3f7fc" }}>
-                    {["Client", "Email", "Montant HT", "Statut", "Délai"].map((h) => (
+                    {["Client", "Email", "Montant HT", "Statut", "Paiement", "Délai"].map((h) => (
                       <th key={h} style={th}>{h}</th>
                     ))}
                   </tr>
@@ -533,6 +748,11 @@ function KpiTab() {
                       <td style={Object.assign({}, td, { color: INK })}>{l.mail}</td>
                       <td style={Object.assign({}, td, { textAlign: "right" })}>{euro(l.montantHT)}</td>
                       <td style={td}><StatutBadge statut={l.statut} /></td>
+                      <td style={td}>
+                        {l.monetico
+                          ? <span style={{ fontSize: 12, fontWeight: 700, color: PURPLE, background: "#f1ecf8", padding: "2px 8px", borderRadius: 20 }}>Monetico</span>
+                          : <span style={{ color: "#b9c2d2" }}>—</span>}
+                      </td>
                       <td style={Object.assign({}, td, { textAlign: "right" })}>{l.delai != null ? l.delai + " j" : "—"}</td>
                     </tr>
                   ))}
@@ -544,9 +764,9 @@ function KpiTab() {
           </Card>
 
           <p style={{ fontSize: 11.5, color: "#94a0b5", marginTop: 14, lineHeight: 1.5 }}>
-            Source de vérité : le fichier des devis envoyés. La colonne Montant HT du devis donne la valeur du devis, de la commande (si signé) et de l'annulation (si annulé).
-            Statut attribué par email : présent dans les bons de commande → signé ; sinon présent dans les annulations → annulé ; sinon en attente.
-            Un BDC ou une annulation sans devis envoyé correspondant est ignoré. Le taux affiné exclut les devis en attente (signés ÷ devis tranchés).
+            Source de vérité : le fichier des devis envoyés. La colonne Montant HT du devis donne la valeur du devis, de la commande, de l'annulation et du paiement.
+            Statut par email : présent dans les bons de commande ou dans les paiements Monetico → accepté ; sinon présent dans les annulations → annulé ; sinon en attente.
+            Un enregistrement sans devis envoyé correspondant est ignoré. Le taux affiné exclut les devis en attente (acceptés ÷ devis tranchés).
           </p>
         </div>
       )}
@@ -563,7 +783,7 @@ function Seg({ w, bg, fg, label }) {
 }
 function StatutBadge({ statut }) {
   const all = {
-    signe: { txt: "Signé", c: GREEN, bg: "#e7f5ed" },
+    signe: { txt: "Accepté", c: GREEN, bg: "#e7f5ed" },
     annule: { txt: "Annulé", c: RED, bg: "#fdecee" },
     attente: { txt: "En attente", c: INK, bg: "#eef2f8" },
   };
@@ -599,7 +819,7 @@ function FileSlot({ title, subtitle, dateLabel, montantLabel, showMontant, optio
       ) : (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <span style={{ fontSize: 12, color: INK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>
+            <span style={{ fontSize: 12, color: INK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>
               {data.name} · {data.rows.length} l.
             </span>
             <button onClick={onReset} style={Object.assign({}, ghostBtn, { padding: "4px 9px", fontSize: 11 })}>Changer</button>
